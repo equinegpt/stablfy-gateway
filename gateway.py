@@ -84,9 +84,7 @@ class SkynetPrice(BaseModel):
 async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
     """
     Single entry point the iOS app will call instead of api.ireel.ai.
-
-    We add the real iReel API key on the server side and pass through
-    assistant_id / project_id / prompt / context.
+    We add the real iReel API key on the server side.
     """
     if not IREEL_API_KEY:
         raise HTTPException(status_code=500, detail="IREEL_API_KEY not configured")
@@ -115,18 +113,38 @@ async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
             detail=f"iReel upstream error: {exc}",
         ) from exc
 
-    if resp.status_code >= 400:
-        # You can make this smarter (parse JSON) if needed.
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    # ---- DEBUG: log what iReel actually returned ----
+    body_text = (resp.text or "").strip()
+    print("🔎 iReel status:", resp.status_code)
+    print("🔎 iReel body (first 400 chars):", body_text[:400])
 
-    data = resp.json()
-    response_text = data.get("response", "") or ""
+    # If iReel itself returns an error code, bubble that up
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=body_text or "iReel error",
+        )
+
+    # No content at all → can't JSON-decode
+    if not body_text:
+        raise HTTPException(
+            status_code=502,
+            detail="Empty response from iReel",
+        )
+
+    # Try to parse JSON; if it fails, return a clean 502 instead of crashing
+    try:
+        data = resp.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=502,
+            detail="Invalid JSON from iReel",
+        )
 
     return IreelChatResponse(
-        response=response_text,
+        response=data.get("response", "") or "",
         raw=data,
     )
-
 
 # -------------------------------------------------------------------
 # SkyNet proxy
