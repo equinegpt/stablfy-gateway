@@ -159,17 +159,15 @@ async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
 # -------------------------------------------------------------------
 # SkyNet proxy
 # -------------------------------------------------------------------
-
-# ---- SkyNet proxy ----
 # ---- SkyNet proxy (PuntingForm → app-safe shape) ----
 
 class SkynetPricesRequest(BaseModel):
-    # Body the **app** sends: { "date": "YYYY-MM-DD" }
+    # Body the app sends: { "date": "YYYY-MM-DD" }
     date: str
 
 
 class SkynetPrice(BaseModel):
-    # Shape the **app** already expects (SkynetRow in Swift)
+    # Shape the app expects (SkynetRow in Swift)
     meetingId: Optional[int] = None
     track: Optional[str] = None
     raceNumber: int
@@ -177,18 +175,18 @@ class SkynetPrice(BaseModel):
     horse: Optional[str] = None
     price: Optional[float] = None          # AI fair price
     tabCurrentPrice: Optional[float] = None  # TAB price
-    rank: Optional[int] = None             # optional (we can add later if we want)
+    rank: Optional[int] = None             # optional for now
 
 
 def _pf_date_variants(iso_date: str) -> list[str]:
     """
-    Turn '2025-12-05' into ['05-dec-2025', '05-Dec-2025'].
-    PuntingForm has historically been picky about case, so we try both.
+    Turn '2025-12-05' into ['05-dec-2025', '05-Dec-2025'] so we match
+    PuntingForm's `meetingDate` expectations.
     """
     try:
         d = dt.date.fromisoformat(iso_date)
     except ValueError:
-        # If the app ever sends an already-formatted meetingDate, just pass it through
+        # If it's already in some dd-mmm-yyyy shape, just try as-is
         return [iso_date]
 
     base = d.strftime("%d-%b-%Y")  # 05-Dec-2025
@@ -225,16 +223,23 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         for pf_date in _pf_date_variants(req.date):
-            params = {
-                "meetingDate": pf_date,
-                "apikey": SKYNET_API_KEY,
-            }
+            params = {"meetingDate": pf_date, "apikey": SKYNET_API_KEY}
 
             try:
                 resp = await client.get(SKYNET_BASE_URL, params=params)
             except httpx.RequestError as exc:
-                last_err = f"request error: {exc}"
+                # This is the bit currently biting us – log *everything*
+                print(
+                    f"[GW SKYNET] RequestError url={SKYNET_BASE_URL} "
+                    f"params={params} exc={repr(exc)}"
+                )
+                last_err = f"request error: {repr(exc)}"
                 continue
+
+            print(
+                f"[GW SKYNET] GET {resp.url} status={resp.status_code} "
+                f"bytes={len(resp.content)}"
+            )
 
             if resp.status_code >= 400:
                 last_err = f"http {resp.status_code}: {resp.text[:200]}"
@@ -243,7 +248,7 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
             try:
                 data = resp.json()
             except ValueError as exc:
-                last_err = f"json error: {exc}"
+                last_err = f"json error: {repr(exc)}"
                 continue
 
             if not isinstance(data, list):
@@ -267,14 +272,16 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
                         track=item.get("venue"),
                         raceNumber=race_no,
                         tabNumber=tab_no,
+                        horse=item.get("horse"),
                         price=item.get("aiPrice"),
                         tabCurrentPrice=item.get("tabPrice"),
                     )
                 )
 
-            return out  # ✅ first successful variant
+            # ✅ First variant that worked
+            return out
 
-    # If we got here, both variants failed
+    # If we get here, both date variants failed
     raise HTTPException(
         status_code=502,
         detail=f"SkyNet upstream error: {last_err or 'no response'}",
