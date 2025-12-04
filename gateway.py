@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Optional, Dict, Any, List
+import datetime as dt          # 👈 add this
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -24,6 +25,12 @@ IREEL_BASE_URL = os.getenv("IREEL_BASE_URL", "https://api.ireel.ai/chat")
 SKYNET_BASE_URL = os.getenv("SKYNET_BASE_URL", "")
 SKYNET_API_KEY = os.getenv("SKYNET_API_KEY", "")
 
+from datetime import datetime
+
+SKYNET_PF_URL = os.getenv(
+    "SKYNET_PF_URL",
+    "https://puntx.puntingform.com.au/api/skynet/getskynetprices",
+)
 
 # -------------------------------------------------------------------
 # Simple header auth for the app
@@ -60,17 +67,20 @@ class IreelChatResponse(BaseModel):
 
 
 class SkynetPricesRequest(BaseModel):
-    meeting_id: int
-    race_number: int
-    date: Optional[str] = None     # ISO date string, e.g. "2025-12-03"
+    # iOS sends: { "date": "2025-12-05" }
+    date: str  # ISO day "YYYY-MM-DD"
 
 
 class SkynetPrice(BaseModel):
+    # Shape that matches SkynetService.SkynetRow on-device
+    meetingId: Optional[int] = None
+    track: Optional[str] = None
+    raceNumber: int
     tabNumber: int
-    price: Optional[float] = None
-    tabCurrentPrice: Optional[float] = None
+    horse: Optional[str] = None
+    price: Optional[float] = None          # AI price
+    tabCurrentPrice: Optional[float] = None  # TAB price
     rank: Optional[int] = None
-
 
 # -------------------------------------------------------------------
 # iReel proxy
@@ -105,7 +115,7 @@ async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
         payload["context"] = req.context
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, params=params, headers=headers, json=payload)
     except httpx.RequestError as exc:
         raise HTTPException(
@@ -150,69 +160,125 @@ async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
 # SkyNet proxy
 # -------------------------------------------------------------------
 
+# ---- SkyNet proxy ----
+# ---- SkyNet proxy (PuntingForm → app-safe shape) ----
+
+class SkynetPricesRequest(BaseModel):
+    # Body the **app** sends: { "date": "YYYY-MM-DD" }
+    date: str
+
+
+class SkynetPrice(BaseModel):
+    # Shape the **app** already expects (SkynetRow in Swift)
+    meetingId: Optional[int] = None
+    track: Optional[str] = None
+    raceNumber: int
+    tabNumber: int
+    horse: Optional[str] = None
+    price: Optional[float] = None          # AI fair price
+    tabCurrentPrice: Optional[float] = None  # TAB price
+    rank: Optional[int] = None             # optional (we can add later if we want)
+
+
+def _pf_date_variants(iso_date: str) -> list[str]:
+    """
+    Turn '2025-12-05' into ['05-dec-2025', '05-Dec-2025'].
+    PuntingForm has historically been picky about case, so we try both.
+    """
+    try:
+        d = dt.date.fromisoformat(iso_date)
+    except ValueError:
+        # If the app ever sends an already-formatted meetingDate, just pass it through
+        return [iso_date]
+
+    base = d.strftime("%d-%b-%Y")  # 05-Dec-2025
+    parts = base.split("-")
+    if len(parts) == 3:
+        lower = f"{parts[0]}-{parts[1].lower()}-{parts[2]}"  # 05-dec-2025
+    else:
+        lower = base.lower()
+    return [lower, base]
+
+
 @app.post(
     "/skynet/prices",
-    response_model=List[SkynetPrice],
+    response_model=list[SkynetPrice],
     dependencies=[Depends(verify_app_token)],
 )
-async def proxy_skynet_prices(req: SkynetPricesRequest) -> List[SkynetPrice]:
+async def proxy_skynet_prices(req: SkynetPricesRequest):
     """
-    Proxy to your existing SkyNet service; hides its URL and API key
-    from the app.
+    App → Gateway:
 
-    Adjust the URL path and params to match your real SkyNet API.
+        POST /skynet/prices
+        { "date": "YYYY-MM-DD" }
+
+    Gateway → PuntingForm:
+
+        GET SKYNET_BASE_URL?meetingDate=dd-mmm-yyyy&apikey=...
+
+    Then we remap PF rows into the SkynetPrice shape the app expects.
     """
-    if not SKYNET_BASE_URL:
-        raise HTTPException(status_code=500, detail="SKYNET_BASE_URL not configured")
+    if not SKYNET_BASE_URL or not SKYNET_API_KEY:
+        raise HTTPException(status_code=500, detail="SkyNet not configured")
 
-    base = SKYNET_BASE_URL.rstrip("/")
-    # TODO: adjust this to your real endpoint path
-    url = f"{base}/api/prices"
+    last_err: Optional[str] = None
 
-    headers: Dict[str, str] = {}
-    if SKYNET_API_KEY:
-        headers["X-API-Key"] = SKYNET_API_KEY
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for pf_date in _pf_date_variants(req.date):
+            params = {
+                "meetingDate": pf_date,
+                "apikey": SKYNET_API_KEY,
+            }
 
-    params: Dict[str, Any] = {
-        "meetingId": req.meeting_id,
-        "raceNumber": req.race_number,
-    }
-    if req.date:
-        params["date"] = req.date
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, params=params, headers=headers)
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"SkyNet upstream error: {exc}",
-        ) from exc
-
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-
-    data = resp.json()
-
-    rows: List[SkynetPrice] = []
-
-    # If your SkyNet API returns a bare list: [...]
-    if isinstance(data, list):
-        src = data
-    else:
-        # Or a wrapper: { "prices": [...] }
-        src = data.get("prices", [])
-
-    for row in src:
-        if isinstance(row, dict):
             try:
-                rows.append(SkynetPrice(**row))
-            except TypeError:
-                # If the shape doesn't match exactly, you can tweak mapping here.
+                resp = await client.get(SKYNET_BASE_URL, params=params)
+            except httpx.RequestError as exc:
+                last_err = f"request error: {exc}"
                 continue
 
-    return rows
+            if resp.status_code >= 400:
+                last_err = f"http {resp.status_code}: {resp.text[:200]}"
+                continue
 
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                last_err = f"json error: {exc}"
+                continue
+
+            if not isinstance(data, list):
+                last_err = f"unexpected payload type: {type(data)}"
+                continue
+
+            out: list[SkynetPrice] = []
+
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+
+                try:
+                    race_no = int(item.get("raceNo"))
+                    tab_no = int(item.get("tabNo"))
+                except (TypeError, ValueError):
+                    continue
+
+                out.append(
+                    SkynetPrice(
+                        track=item.get("venue"),
+                        raceNumber=race_no,
+                        tabNumber=tab_no,
+                        price=item.get("aiPrice"),
+                        tabCurrentPrice=item.get("tabPrice"),
+                    )
+                )
+
+            return out  # ✅ first successful variant
+
+    # If we got here, both variants failed
+    raise HTTPException(
+        status_code=502,
+        detail=f"SkyNet upstream error: {last_err or 'no response'}",
+    )
 
 # -------------------------------------------------------------------
 # Healthcheck
