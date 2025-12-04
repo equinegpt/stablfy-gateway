@@ -166,10 +166,15 @@ class SkynetPricesRequest(BaseModel):
 
 
 class SkynetPrice(BaseModel):
-    tabNumber: int
-    price: float | None = None          # AI fair price
+    # Which race this row belongs to
+    track: str | None = None         # e.g. "Cranbourne"
+    raceNumber: int                  # e.g. 2
+
+    # Runner-level info
+    tabNumber: int                   # TAB no
+    price: float | None = None       # AI fair price
     tabCurrentPrice: float | None = None  # TAB price
-    rank: int | None = None             # optional, if PF ever adds it
+    rank: int | None = None          # model rank (if PF sends it)
 
 
 @app.post(
@@ -246,16 +251,20 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
                 continue
 
             tab_no = row.get("tabNo") or row.get("tabNumber")
-            if tab_no is None:
+            race_no = row.get("raceNo") or row.get("raceNumber")
+            track_name = row.get("venue") or row.get("track")
+
+            # Need at least race + tab to be useful
+            if tab_no is None or race_no is None:
                 continue
 
             prices.append(
                 SkynetPrice(
+                    track=track_name,
+                    raceNumber=int(race_no),
                     tabNumber=int(tab_no),
                     price=row.get("aiPrice") or row.get("price"),
-                    tabCurrentPrice=row.get("tabPrice") or row.get(
-                        "tabCurrentPrice"
-                    ),
+                    tabCurrentPrice=row.get("tabPrice") or row.get("tabCurrentPrice"),
                     rank=row.get("rank"),
                 )
             )
