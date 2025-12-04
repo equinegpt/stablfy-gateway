@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Optional, Dict, Any, List
 import datetime as dt          # 👈 add this
+from datetime import date as _date
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Depends
@@ -159,129 +160,112 @@ async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
 # -------------------------------------------------------------------
 # SkyNet proxy
 # -------------------------------------------------------------------
-# ---- SkyNet proxy (PuntingForm → app-safe shape) ----
-
 class SkynetPricesRequest(BaseModel):
-    # Body the app sends: { "date": "YYYY-MM-DD" }
+    # from the app: { "date": "2025-12-05" }
     date: str
 
 
 class SkynetPrice(BaseModel):
-    # Shape the app expects (SkynetRow in Swift)
-    meetingId: Optional[int] = None
-    track: Optional[str] = None
-    raceNumber: int
     tabNumber: int
-    horse: Optional[str] = None
-    price: Optional[float] = None          # AI fair price
-    tabCurrentPrice: Optional[float] = None  # TAB price
-    rank: Optional[int] = None             # optional for now
-
-
-def _pf_date_variants(iso_date: str) -> list[str]:
-    """
-    Turn '2025-12-05' into ['05-dec-2025', '05-Dec-2025'] so we match
-    PuntingForm's `meetingDate` expectations.
-    """
-    try:
-        d = dt.date.fromisoformat(iso_date)
-    except ValueError:
-        # If it's already in some dd-mmm-yyyy shape, just try as-is
-        return [iso_date]
-
-    base = d.strftime("%d-%b-%Y")  # 05-Dec-2025
-    parts = base.split("-")
-    if len(parts) == 3:
-        lower = f"{parts[0]}-{parts[1].lower()}-{parts[2]}"  # 05-dec-2025
-    else:
-        lower = base.lower()
-    return [lower, base]
+    price: float | None = None          # AI fair price
+    tabCurrentPrice: float | None = None  # TAB price
+    rank: int | None = None             # optional, if PF ever adds it
 
 
 @app.post(
     "/skynet/prices",
-    response_model=list[SkynetPrice],
+    response_model=List[SkynetPrice],
     dependencies=[Depends(verify_app_token)],
 )
 async def proxy_skynet_prices(req: SkynetPricesRequest):
     """
-    App → Gateway:
+    Fetch Skynet prices for a given day from PuntingForm and return a
+    trimmed structure used by the app.
 
-        POST /skynet/prices
-        { "date": "YYYY-MM-DD" }
-
-    Gateway → PuntingForm:
-
-        GET SKYNET_BASE_URL?meetingDate=dd-mmm-yyyy&apikey=...
-
-    Then we remap PF rows into the SkynetPrice shape the app expects.
+    Body from app: { "date": "YYYY-MM-DD" }.
     """
-    if not SKYNET_BASE_URL or not SKYNET_API_KEY:
+    if not SKYNET_BASE_URL:
         raise HTTPException(status_code=500, detail="SkyNet not configured")
 
-    last_err: Optional[str] = None
+    # Parse ISO date from the app
+    try:
+        d = _date.fromisoformat(req.date)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="date must be in ISO format YYYY-MM-DD",
+        )
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        for pf_date in _pf_date_variants(req.date):
-            params = {"meetingDate": pf_date, "apikey": SKYNET_API_KEY}
+    # PF wants dd-MMM-yyyy; we try 03-dec-2025 then 03-Dec-2025
+    lower = d.strftime("%d-%b-%Y").lower()
+    normal = d.strftime("%d-%b-%Y")
+    date_variants = [lower, normal]
 
-            try:
+    last_err: Exception | None = None
+
+    for meeting_date in date_variants:
+        params = {
+            "meetingDate": meeting_date,
+            "apikey": SKYNET_API_KEY or "",
+        }
+        print(f"[GW SKYNET] GET {SKYNET_BASE_URL} params={params}")
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0, read=30.0)
+            ) as client:
                 resp = await client.get(SKYNET_BASE_URL, params=params)
-            except httpx.RequestError as exc:
-                # This is the bit currently biting us – log *everything*
-                print(
-                    f"[GW SKYNET] RequestError url={SKYNET_BASE_URL} "
-                    f"params={params} exc={repr(exc)}"
-                )
-                last_err = f"request error: {repr(exc)}"
+        except httpx.RequestError as exc:
+            print(
+                f"[GW SKYNET] RequestError date={meeting_date} "
+                f"exc={exc!r}"
+            )
+            last_err = exc
+            continue
+
+        if resp.status_code >= 400:
+            print(
+                f"[GW SKYNET] HTTP {resp.status_code} "
+                f"body={resp.text[:300]}"
+            )
+            last_err = HTTPException(
+                status_code=resp.status_code,
+                detail=resp.text,
+            )
+            continue
+
+        data = resp.json()
+        if not isinstance(data, list):
+            print(f"[GW SKYNET] Unexpected JSON shape: {type(data)}")
+            last_err = RuntimeError("unexpected Skynet JSON shape")
+            continue
+
+        prices: list[SkynetPrice] = []
+        for row in data:
+            if not isinstance(row, dict):
                 continue
 
-            print(
-                f"[GW SKYNET] GET {resp.url} status={resp.status_code} "
-                f"bytes={len(resp.content)}"
+            tab_no = row.get("tabNo") or row.get("tabNumber")
+            if tab_no is None:
+                continue
+
+            prices.append(
+                SkynetPrice(
+                    tabNumber=int(tab_no),
+                    price=row.get("aiPrice") or row.get("price"),
+                    tabCurrentPrice=row.get("tabPrice") or row.get(
+                        "tabCurrentPrice"
+                    ),
+                    rank=row.get("rank"),
+                )
             )
 
-            if resp.status_code >= 400:
-                last_err = f"http {resp.status_code}: {resp.text[:200]}"
-                continue
+        print(
+            f"[GW SKYNET] OK date={meeting_date}, rows={len(prices)}"
+        )
+        return prices
 
-            try:
-                data = resp.json()
-            except ValueError as exc:
-                last_err = f"json error: {repr(exc)}"
-                continue
-
-            if not isinstance(data, list):
-                last_err = f"unexpected payload type: {type(data)}"
-                continue
-
-            out: list[SkynetPrice] = []
-
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-
-                try:
-                    race_no = int(item.get("raceNo"))
-                    tab_no = int(item.get("tabNo"))
-                except (TypeError, ValueError):
-                    continue
-
-                out.append(
-                    SkynetPrice(
-                        track=item.get("venue"),
-                        raceNumber=race_no,
-                        tabNumber=tab_no,
-                        horse=item.get("horse"),
-                        price=item.get("aiPrice"),
-                        tabCurrentPrice=item.get("tabPrice"),
-                    )
-                )
-
-            # ✅ First variant that worked
-            return out
-
-    # If we get here, both date variants failed
+    # If we get here, both variants failed (even with long timeout)
     raise HTTPException(
         status_code=502,
         detail=f"SkyNet upstream error: {last_err or 'no response'}",
