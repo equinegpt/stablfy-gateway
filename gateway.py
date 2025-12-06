@@ -179,7 +179,7 @@ class SkynetPrice(BaseModel):
 
 @app.post(
     "/skynet/prices",
-    response_model=List[SkynetPrice],
+    response_model=list[SkynetPrice],
     dependencies=[Depends(verify_app_token)],
 )
 async def proxy_skynet_prices(req: SkynetPricesRequest):
@@ -188,6 +188,9 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
     trimmed structure used by the app.
 
     Body from app: { "date": "YYYY-MM-DD" }.
+
+    On PF timeouts / request errors we now degrade gracefully and
+    return an empty list instead of 502 so the app keeps working.
     """
     if not SKYNET_BASE_URL:
         raise HTTPException(status_code=500, detail="SkyNet not configured")
@@ -201,84 +204,95 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
             detail="date must be in ISO format YYYY-MM-DD",
         )
 
-    # PF wants dd-MMM-yyyy; we try 03-dec-2025 then 03-Dec-2025
+    # PF wants dd-MMM-yyyy; try 06-dec-2025 then 06-Dec-2025
     lower = d.strftime("%d-%b-%Y").lower()
     normal = d.strftime("%d-%b-%Y")
     date_variants = [lower, normal]
 
-    last_err: Exception | None = None
+    last_exc: Exception | None = None
 
-    for meeting_date in date_variants:
-        params = {
-            "meetingDate": meeting_date,
-            "apikey": SKYNET_API_KEY or "",
-        }
-        print(f"[GW SKYNET] GET {SKYNET_BASE_URL} params={params}")
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(35.0, connect=10.0, read=35.0)
+    ) as client:
+        for meeting_date in date_variants:
+            params = {
+                "meetingDate": meeting_date,
+                "apikey": SKYNET_API_KEY or "",
+            }
+            print(f"[GW SKYNET] GET {SKYNET_BASE_URL} params={params}")
 
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, connect=10.0, read=30.0)
-            ) as client:
+            try:
                 resp = await client.get(SKYNET_BASE_URL, params=params)
-        except httpx.RequestError as exc:
-            print(
-                f"[GW SKYNET] RequestError date={meeting_date} "
-                f"exc={exc!r}"
-            )
-            last_err = exc
-            continue
-
-        if resp.status_code >= 400:
-            print(
-                f"[GW SKYNET] HTTP {resp.status_code} "
-                f"body={resp.text[:300]}"
-            )
-            last_err = HTTPException(
-                status_code=resp.status_code,
-                detail=resp.text,
-            )
-            continue
-
-        data = resp.json()
-        if not isinstance(data, list):
-            print(f"[GW SKYNET] Unexpected JSON shape: {type(data)}")
-            last_err = RuntimeError("unexpected Skynet JSON shape")
-            continue
-
-        prices: list[SkynetPrice] = []
-        for row in data:
-            if not isinstance(row, dict):
-                continue
-
-            tab_no = row.get("tabNo") or row.get("tabNumber")
-            race_no = row.get("raceNo") or row.get("raceNumber")
-            track_name = row.get("venue") or row.get("track")
-
-            # Need at least race + tab to be useful
-            if tab_no is None or race_no is None:
-                continue
-
-            prices.append(
-                SkynetPrice(
-                    track=track_name,
-                    raceNumber=int(race_no),
-                    tabNumber=int(tab_no),
-                    price=row.get("aiPrice") or row.get("price"),
-                    tabCurrentPrice=row.get("tabPrice") or row.get("tabCurrentPrice"),
-                    rank=row.get("rank"),
+                # raise for 4xx/5xx so we can handle in one place
+                resp.raise_for_status()
+            except httpx.ReadTimeout as exc:
+                # PF is just taking too long – log + try next variant
+                print(
+                    f"[GW SKYNET] ReadTimeout date={meeting_date} "
+                    f"exc={exc!r}"
                 )
-            )
+                last_exc = exc
+                continue
+            except httpx.RequestError as exc:
+                print(
+                    f"[GW SKYNET] RequestError date={meeting_date} "
+                    f"exc={exc!r}"
+                )
+                last_exc = exc
+                continue
+            except httpx.HTTPStatusError as exc:
+                # Non-200 from PF – log; we’ll degrade gracefully below
+                print(
+                    f"[GW SKYNET] HTTP {resp.status_code} "
+                    f"for date={meeting_date} body={resp.text[:300]!r}"
+                )
+                last_exc = exc
+                continue
 
-        print(
-            f"[GW SKYNET] OK date={meeting_date}, rows={len(prices)}"
-        )
-        return prices
+            # --- JSON shape normalisation: list or {rows:[...]} / {prices:[...]} ---
+            data = resp.json()
+            if isinstance(data, list):
+                raw_rows = data
+            elif isinstance(data, dict):
+                raw_rows = data.get("rows") or data.get("prices") or []
+            else:
+                print(f"[GW SKYNET] Unexpected JSON type: {type(data)}")
+                raw_rows = []
 
-    # If we get here, both variants failed (even with long timeout)
-    raise HTTPException(
-        status_code=502,
-        detail=f"SkyNet upstream error: {last_err or 'no response'}",
+            prices: list[SkynetPrice] = []
+            for row in raw_rows:
+                if not isinstance(row, dict):
+                    continue
+
+                tab_no = row.get("tabNo") or row.get("tabNumber")
+                race_no = row.get("raceNo") or row.get("raceNumber")
+                track_name = row.get("venue") or row.get("track")
+
+                # Need at least race + TAB to be useful
+                if tab_no is None or race_no is None:
+                    continue
+
+                prices.append(
+                    SkynetPrice(
+                        track=track_name,
+                        raceNumber=int(race_no),
+                        tabNumber=int(tab_no),
+                        price=row.get("aiPrice") or row.get("price"),
+                        tabCurrentPrice=row.get("tabPrice") or row.get("tabCurrentPrice"),
+                        rank=row.get("rank"),
+                    )
+                )
+
+            print(f"[GW SKYNET] OK date={meeting_date}, rows={len(prices)}")
+            return prices
+
+    # If we get here, both variants failed.
+    # Instead of 502, degrade gracefully so the app can still show tips.
+    print(
+        f"[GW SKYNET] giving up for {req.date}, "
+        f"returning empty Skynet list; last_exc={last_exc!r}"
     )
+    return []
 
 # -------------------------------------------------------------------
 # Healthcheck
