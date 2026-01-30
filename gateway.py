@@ -1,17 +1,70 @@
 from __future__ import annotations
 
 import os
+import secrets
+import string
+from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
-import datetime as dt          # 👈 add this
-from datetime import date as _date
+import datetime as dt
+from datetime import date as _date, datetime
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Query
 from pydantic import BaseModel
+from sqlalchemy import Column, String, DateTime, ForeignKey, select, func
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+
+
+# -------------------------------------------------------------------
+# Database Setup
+# -------------------------------------------------------------------
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./referrals.db")
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class ReferralCode(Base):
+    __tablename__ = "referral_codes"
+
+    device_id = Column(String, primary_key=True)
+    code = Column(String, unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ReferralRedemption(Base):
+    __tablename__ = "referral_redemptions"
+
+    redeemer_device_id = Column(String, primary_key=True)
+    code_used = Column(String, ForeignKey("referral_codes.code"), nullable=False)
+    referrer_device_id = Column(String, nullable=False)
+    redeemed_at = Column(DateTime, default=datetime.utcnow)
+
+
+engine = create_async_engine(DATABASE_URL, echo=False)
+async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def get_db():
+    async with async_session() as session:
+        yield session
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    await engine.dispose()
+
 
 app = FastAPI(
     title="Stablfy Gateway",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # -------------------------------------------------------------------
@@ -25,8 +78,6 @@ IREEL_BASE_URL = os.getenv("IREEL_BASE_URL", "https://api.ireel.ai/chat")
 
 SKYNET_BASE_URL = os.getenv("SKYNET_BASE_URL", "")
 SKYNET_API_KEY = os.getenv("SKYNET_API_KEY", "")
-
-from datetime import datetime
 
 SKYNET_PF_URL = os.getenv(
     "SKYNET_PF_URL",
@@ -82,6 +133,32 @@ class SkynetPrice(BaseModel):
     price: Optional[float] = None          # AI price
     tabCurrentPrice: Optional[float] = None  # TAB price
     rank: Optional[int] = None
+
+
+# Referral Models
+class ReferralGenerateRequest(BaseModel):
+    deviceId: str
+
+
+class ReferralGenerateResponse(BaseModel):
+    code: str
+    referralCount: int
+
+
+class ReferralRedeemRequest(BaseModel):
+    code: str
+    deviceId: str
+
+
+class ReferralRedeemResponse(BaseModel):
+    success: bool
+    questionsAwarded: int
+    message: Optional[str] = None
+
+
+class ReferralStatusResponse(BaseModel):
+    hasRedeemed: bool
+
 
 # -------------------------------------------------------------------
 # iReel proxy
@@ -301,3 +378,117 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# -------------------------------------------------------------------
+# Referral Endpoints
+# -------------------------------------------------------------------
+
+def generate_referral_code() -> str:
+    chars = string.ascii_uppercase + string.digits
+    random_part = "".join(secrets.choice(chars) for _ in range(6))
+    return f"STAB-{random_part}"
+
+
+@app.post(
+    "/referral/generate",
+    response_model=ReferralGenerateResponse,
+    dependencies=[Depends(verify_app_token)],
+)
+async def referral_generate(
+    req: ReferralGenerateRequest, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(ReferralCode).where(ReferralCode.device_id == req.deviceId)
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        count_result = await db.execute(
+            select(func.count())
+            .select_from(ReferralRedemption)
+            .where(ReferralRedemption.code_used == existing.code)
+        )
+        referral_count = count_result.scalar() or 0
+        return ReferralGenerateResponse(code=existing.code, referralCount=referral_count)
+
+    for _ in range(10):
+        new_code = generate_referral_code()
+        check = await db.execute(
+            select(ReferralCode).where(ReferralCode.code == new_code)
+        )
+        if not check.scalar_one_or_none():
+            break
+    else:
+        raise HTTPException(status_code=500, detail="Failed to generate unique code")
+
+    referral_code = ReferralCode(device_id=req.deviceId, code=new_code)
+    db.add(referral_code)
+    await db.commit()
+
+    return ReferralGenerateResponse(code=new_code, referralCount=0)
+
+
+@app.post(
+    "/referral/redeem",
+    response_model=ReferralRedeemResponse,
+    dependencies=[Depends(verify_app_token)],
+)
+async def referral_redeem(
+    req: ReferralRedeemRequest, db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(ReferralCode).where(ReferralCode.code == req.code.upper())
+    )
+    referral_code = result.scalar_one_or_none()
+
+    if not referral_code:
+        return ReferralRedeemResponse(
+            success=False, questionsAwarded=0, message="Invalid referral code"
+        )
+
+    if referral_code.device_id == req.deviceId:
+        return ReferralRedeemResponse(
+            success=False,
+            questionsAwarded=0,
+            message="You can't use your own referral code",
+        )
+
+    existing_redemption = await db.execute(
+        select(ReferralRedemption).where(
+            ReferralRedemption.redeemer_device_id == req.deviceId
+        )
+    )
+    if existing_redemption.scalar_one_or_none():
+        return ReferralRedeemResponse(
+            success=False,
+            questionsAwarded=0,
+            message="You have already used a referral code",
+        )
+
+    redemption = ReferralRedemption(
+        redeemer_device_id=req.deviceId,
+        code_used=req.code.upper(),
+        referrer_device_id=referral_code.device_id,
+    )
+    db.add(redemption)
+    await db.commit()
+
+    return ReferralRedeemResponse(success=True, questionsAwarded=50, message=None)
+
+
+@app.get(
+    "/referral/status",
+    response_model=ReferralStatusResponse,
+    dependencies=[Depends(verify_app_token)],
+)
+async def referral_status(
+    deviceId: str = Query(...), db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(ReferralRedemption).where(
+            ReferralRedemption.redeemer_device_id == deviceId
+        )
+    )
+    has_redeemed = result.scalar_one_or_none() is not None
+    return ReferralStatusResponse(hasRedeemed=has_redeemed)
