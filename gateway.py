@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import string
+import time
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 import datetime as dt
@@ -83,6 +84,8 @@ SKYNET_PF_URL = os.getenv(
     "SKYNET_PF_URL",
     "https://puntx.puntingform.com.au/api/skynet/getskynetprices",
 )
+
+PF_API_KEY = os.getenv("PF_API_KEY", "c867b2f9-d740-4cce-b772-801708c8191d")
 
 # -------------------------------------------------------------------
 # Simple header auth for the app
@@ -237,6 +240,11 @@ async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
 # -------------------------------------------------------------------
 # SkyNet proxy
 # -------------------------------------------------------------------
+
+# In-memory cache: { "YYYY-MM-DD": (timestamp, [SkynetPrice, ...]) }
+_skynet_cache: dict[str, tuple[float, list]] = {}
+_SKYNET_CACHE_TTL = 300  # 5 minutes
+
 class SkynetPricesRequest(BaseModel):
     # from the app: { "date": "2025-12-05" }
     date: str
@@ -269,6 +277,14 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
     On PF timeouts / request errors we now degrade gracefully and
     return an empty list instead of 502 so the app keeps working.
     """
+    # --- In-memory cache: serve instantly if fresh ---
+    cached = _skynet_cache.get(req.date)
+    if cached:
+        ts, rows = cached
+        if time.time() - ts < _SKYNET_CACHE_TTL:
+            print(f"[GW SKYNET] CACHE HIT date={req.date}, rows={len(rows)}")
+            return rows
+
     if not SKYNET_BASE_URL:
         raise HTTPException(status_code=500, detail="SkyNet not configured")
 
@@ -361,6 +377,8 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
                 )
 
             print(f"[GW SKYNET] OK date={meeting_date}, rows={len(prices)}")
+            if prices:
+                _skynet_cache[req.date] = (time.time(), prices)
             return prices
 
     # If we get here, both variants failed.
@@ -370,6 +388,62 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
         f"returning empty Skynet list; last_exc={last_exc!r}"
     )
     return []
+
+# -------------------------------------------------------------------
+# Sectionals proxy (Punting Form race data)
+# -------------------------------------------------------------------
+
+@app.get(
+    "/sectionals",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_sectionals(
+    meetingId: int = Query(...),
+    raceNumber: int = Query(...),
+):
+    """
+    Proxy sectional times from the PuntingForm iReel race endpoint.
+    Returns raw PF JSON — the Flutter app handles parsing.
+    """
+    if not PF_API_KEY:
+        raise HTTPException(status_code=500, detail="PF_API_KEY not configured")
+
+    url = "https://api.puntingform.com.au/v2/ireel/race"
+    params = {
+        "meetingId": meetingId,
+        "raceNumber": raceNumber,
+        "apiKey": PF_API_KEY,
+    }
+
+    print(f"[GW SECTIONALS] GET {url} meetingId={meetingId} raceNumber={raceNumber}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"PF upstream error: {exc}",
+        ) from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.text[:300] or "PF error",
+        )
+
+    body_text = (resp.text or "").strip()
+    if not body_text:
+        raise HTTPException(status_code=502, detail="Empty response from PF")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Invalid JSON from PF")
+
+    print(f"[GW SECTIONALS] OK meetingId={meetingId} raceNumber={raceNumber}")
+    return data
+
 
 # -------------------------------------------------------------------
 # Healthcheck
