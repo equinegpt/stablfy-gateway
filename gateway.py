@@ -390,7 +390,167 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
     return []
 
 # -------------------------------------------------------------------
-# Sectionals proxy (Punting Form race data)
+# Punting Form Proxy (meetings, races, sectionals) - iOS Gateway
+# -------------------------------------------------------------------
+
+PF_BASE_URL = "https://api.puntingform.com.au"
+
+
+@app.get(
+    "/pf/meetings",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_pf_meetings(
+    meetingDate: str = Query(..., description="Date in 'd MMM yyyy' format e.g. '22 Oct 2025'"),
+):
+    """
+    Proxy PF meetings list - iOS app calls this instead of PF directly.
+    No API key in the app; we add it server-side.
+    """
+    if not PF_API_KEY:
+        raise HTTPException(status_code=500, detail="PF_API_KEY not configured")
+
+    url = f"{PF_BASE_URL}/v2/form/meetingslist"
+    params = {
+        "apiKey": PF_API_KEY,
+        "meetingDate": meetingDate,
+        "includeRaces": "true",
+    }
+
+    print(f"[GW PF MEETINGS] GET {url} meetingDate={meetingDate}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"PF upstream error: {exc}",
+        ) from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.text[:300] or "PF error",
+        )
+
+    body_text = (resp.text or "").strip()
+    if not body_text:
+        raise HTTPException(status_code=502, detail="Empty response from PF")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Invalid JSON from PF")
+
+    print(f"[GW PF MEETINGS] OK meetingDate={meetingDate}")
+    return data
+
+
+@app.get(
+    "/pf/races",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_pf_races(
+    meetingId: str = Query(..., description="PF meeting ID"),
+):
+    """
+    Proxy PF races list for a meeting - iOS app calls this instead of PF directly.
+    Tries multiple endpoint variants since PF API can be inconsistent.
+    """
+    if not PF_API_KEY:
+        raise HTTPException(status_code=500, detail="PF_API_KEY not configured")
+
+    # Candidate PF endpoints (same as iOS client tries)
+    endpoints = [
+        f"{PF_BASE_URL}/v2/form/raceslist",
+        f"{PF_BASE_URL}/v2/form/races",
+        f"{PF_BASE_URL}/v2/form/meetingraces",
+        f"{PF_BASE_URL}/v2/form/meeting/races",
+        f"{PF_BASE_URL}/v2/form/races/list",
+        f"{PF_BASE_URL}/v2/form/raceday",
+        f"{PF_BASE_URL}/v2/form/racecard",
+        f"{PF_BASE_URL}/v2/form/meeting",
+    ]
+
+    params = {
+        "apiKey": PF_API_KEY,
+        "meetingId": meetingId,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for url in endpoints:
+            print(f"[GW PF RACES] trying {url} meetingId={meetingId}")
+            try:
+                resp = await client.get(url, params=params)
+                if resp.status_code < 400:
+                    body_text = (resp.text or "").strip()
+                    if body_text:
+                        data = resp.json()
+                        print(f"[GW PF RACES] OK from {url}")
+                        return data
+            except (httpx.RequestError, ValueError):
+                continue
+
+    # None worked - return empty
+    print(f"[GW PF RACES] all endpoints failed for meetingId={meetingId}")
+    return []
+
+
+@app.get(
+    "/pf/sectionals",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_pf_sectionals(
+    meetingId: str = Query(..., description="PF meeting ID"),
+    raceNumber: int = Query(..., description="Race number"),
+):
+    """
+    Proxy PF sectionals/iReel race data - iOS app calls this instead of PF directly.
+    Returns raw PF JSON — the iOS app handles parsing.
+    """
+    if not PF_API_KEY:
+        raise HTTPException(status_code=500, detail="PF_API_KEY not configured")
+
+    url = f"{PF_BASE_URL}/v2/ireel/race"
+    params = {
+        "meetingId": meetingId,
+        "raceNumber": raceNumber,
+        "apiKey": PF_API_KEY,
+    }
+
+    print(f"[GW PF SECTIONALS] GET {url} meetingId={meetingId} raceNumber={raceNumber}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"PF upstream error: {exc}",
+        ) from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.text[:300] or "PF error",
+        )
+
+    body_text = (resp.text or "").strip()
+    if not body_text:
+        raise HTTPException(status_code=502, detail="Empty response from PF")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Invalid JSON from PF")
+
+    print(f"[GW PF SECTIONALS] OK meetingId={meetingId} raceNumber={raceNumber}")
+    return data
+
+
+# -------------------------------------------------------------------
+# Sectionals proxy (Legacy - keeping for backwards compat)
 # -------------------------------------------------------------------
 
 @app.get(
@@ -566,3 +726,286 @@ async def referral_status(
     )
     has_redeemed = result.scalar_one_or_none() is not None
     return ReferralStatusResponse(hasRedeemed=has_redeemed)
+
+
+# -------------------------------------------------------------------
+# Referral Admin Dashboard & Stats
+# -------------------------------------------------------------------
+
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "stablfy-admin-2026")
+
+
+class ReferralStatsResponse(BaseModel):
+    total_codes: int
+    total_redemptions: int
+    questions_awarded: int
+    top_referrers: list
+    recent_redemptions: list
+
+
+@app.get("/referral/stats")
+async def referral_stats(
+    secret: str = Query(..., description="Admin secret for access"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    JSON stats endpoint for referral program.
+    Access: /referral/stats?secret=<ADMIN_SECRET>
+    """
+    if secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+
+    # Total codes generated
+    codes_result = await db.execute(select(func.count()).select_from(ReferralCode))
+    total_codes = codes_result.scalar() or 0
+
+    # Total redemptions
+    redemptions_result = await db.execute(
+        select(func.count()).select_from(ReferralRedemption)
+    )
+    total_redemptions = redemptions_result.scalar() or 0
+
+    # Questions awarded (50 per redemption)
+    questions_awarded = total_redemptions * 50
+
+    # Top referrers (by redemption count)
+    top_referrers_result = await db.execute(
+        select(
+            ReferralCode.code,
+            ReferralCode.device_id,
+            func.count(ReferralRedemption.redeemer_device_id).label("count"),
+        )
+        .outerjoin(ReferralRedemption, ReferralCode.code == ReferralRedemption.code_used)
+        .group_by(ReferralCode.code, ReferralCode.device_id)
+        .order_by(func.count(ReferralRedemption.redeemer_device_id).desc())
+        .limit(10)
+    )
+    top_referrers = [
+        {
+            "code": row.code,
+            "device_id": row.device_id[:8] + "...",  # Truncate for privacy
+            "redemptions": row.count,
+            "questions_earned": row.count * 50,
+        }
+        for row in top_referrers_result.all()
+    ]
+
+    # Recent redemptions (last 20)
+    recent_result = await db.execute(
+        select(ReferralRedemption)
+        .order_by(ReferralRedemption.redeemed_at.desc())
+        .limit(20)
+    )
+    recent_redemptions = [
+        {
+            "code": r.code_used,
+            "redeemer": r.redeemer_device_id[:8] + "...",
+            "referrer": r.referrer_device_id[:8] + "...",
+            "redeemed_at": r.redeemed_at.isoformat() if r.redeemed_at else None,
+        }
+        for r in recent_result.scalars().all()
+    ]
+
+    return ReferralStatsResponse(
+        total_codes=total_codes,
+        total_redemptions=total_redemptions,
+        questions_awarded=questions_awarded,
+        top_referrers=top_referrers,
+        recent_redemptions=recent_redemptions,
+    )
+
+
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/referral/dashboard", response_class=HTMLResponse)
+async def referral_dashboard(
+    secret: str = Query(..., description="Admin secret for access"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Simple HTML dashboard for referral program stats.
+    Access: /referral/dashboard?secret=<ADMIN_SECRET>
+    """
+    if secret != ADMIN_SECRET:
+        return HTMLResponse(
+            content="<h1>403 Forbidden</h1><p>Invalid admin secret</p>",
+            status_code=403,
+        )
+
+    # Fetch stats
+    codes_result = await db.execute(select(func.count()).select_from(ReferralCode))
+    total_codes = codes_result.scalar() or 0
+
+    redemptions_result = await db.execute(
+        select(func.count()).select_from(ReferralRedemption)
+    )
+    total_redemptions = redemptions_result.scalar() or 0
+    questions_awarded = total_redemptions * 50
+
+    # Top referrers
+    top_referrers_result = await db.execute(
+        select(
+            ReferralCode.code,
+            ReferralCode.device_id,
+            ReferralCode.created_at,
+            func.count(ReferralRedemption.redeemer_device_id).label("count"),
+        )
+        .outerjoin(ReferralRedemption, ReferralCode.code == ReferralRedemption.code_used)
+        .group_by(ReferralCode.code, ReferralCode.device_id, ReferralCode.created_at)
+        .order_by(func.count(ReferralRedemption.redeemer_device_id).desc())
+        .limit(15)
+    )
+    top_referrers = top_referrers_result.all()
+
+    # Recent redemptions
+    recent_result = await db.execute(
+        select(ReferralRedemption)
+        .order_by(ReferralRedemption.redeemed_at.desc())
+        .limit(20)
+    )
+    recent_redemptions = recent_result.scalars().all()
+
+    # Build HTML
+    referrers_rows = ""
+    for r in top_referrers:
+        created = r.created_at.strftime("%d %b %Y") if r.created_at else "—"
+        referrers_rows += f"""
+        <tr>
+            <td><code>{r.code}</code></td>
+            <td>{r.device_id[:12]}...</td>
+            <td>{created}</td>
+            <td><strong>{r.count}</strong></td>
+            <td>{r.count * 50}</td>
+        </tr>
+        """
+
+    redemptions_rows = ""
+    for r in recent_redemptions:
+        redeemed = r.redeemed_at.strftime("%d %b %Y %H:%M") if r.redeemed_at else "—"
+        redemptions_rows += f"""
+        <tr>
+            <td><code>{r.code_used}</code></td>
+            <td>{r.redeemer_device_id[:12]}...</td>
+            <td>{r.referrer_device_id[:12]}...</td>
+            <td>{redeemed}</td>
+        </tr>
+        """
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Stablfy Referral Dashboard</title>
+        <style>
+            * {{ box-sizing: border-box; }}
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: #1a1a2e;
+                color: #eee;
+                margin: 0;
+                padding: 20px;
+            }}
+            h1 {{ color: #FFD700; margin-bottom: 5px; }}
+            .subtitle {{ color: #888; margin-bottom: 30px; }}
+            .stats {{
+                display: flex;
+                gap: 20px;
+                flex-wrap: wrap;
+                margin-bottom: 30px;
+            }}
+            .stat-card {{
+                background: #2a2a4a;
+                border-radius: 12px;
+                padding: 20px 30px;
+                min-width: 180px;
+            }}
+            .stat-card h3 {{ margin: 0; color: #888; font-size: 14px; }}
+            .stat-card .value {{ font-size: 36px; font-weight: bold; color: #FFD700; }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-bottom: 30px;
+                background: #2a2a4a;
+                border-radius: 12px;
+                overflow: hidden;
+            }}
+            th, td {{
+                padding: 12px 16px;
+                text-align: left;
+                border-bottom: 1px solid #3a3a5a;
+            }}
+            th {{ background: #3a3a5a; color: #FFD700; }}
+            tr:hover {{ background: #3a3a5a; }}
+            code {{
+                background: #3a3a5a;
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 13px;
+            }}
+            .section-title {{ color: #FFD700; margin: 30px 0 15px 0; }}
+            .refresh {{ color: #888; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Stablfy Referral Dashboard</h1>
+        <p class="subtitle">Friends Referral Program Stats</p>
+
+        <div class="stats">
+            <div class="stat-card">
+                <h3>Total Codes</h3>
+                <div class="value">{total_codes}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Redemptions</h3>
+                <div class="value">{total_redemptions}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Questions Awarded</h3>
+                <div class="value">{questions_awarded}</div>
+            </div>
+            <div class="stat-card">
+                <h3>Conversion</h3>
+                <div class="value">{(total_redemptions / total_codes * 100) if total_codes > 0 else 0:.1f}%</div>
+            </div>
+        </div>
+
+        <h2 class="section-title">Top Referrers</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Code</th>
+                    <th>Device ID</th>
+                    <th>Created</th>
+                    <th>Redemptions</th>
+                    <th>Questions Earned</th>
+                </tr>
+            </thead>
+            <tbody>
+                {referrers_rows if referrers_rows else '<tr><td colspan="5" style="text-align:center;color:#888;">No referral codes yet</td></tr>'}
+            </tbody>
+        </table>
+
+        <h2 class="section-title">Recent Redemptions</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Code Used</th>
+                    <th>Redeemer</th>
+                    <th>Referrer</th>
+                    <th>Redeemed At</th>
+                </tr>
+            </thead>
+            <tbody>
+                {redemptions_rows if redemptions_rows else '<tr><td colspan="4" style="text-align:center;color:#888;">No redemptions yet</td></tr>'}
+            </tbody>
+        </table>
+
+        <p class="refresh">Refresh page to update stats</p>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(content=html)
