@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)",
+      "Bash(git reset:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd referral system API endpoints\n\n- POST /referral/generate - Generate or retrieve referral code\n- POST /referral/redeem - Redeem a code \\(50 questions to both parties\\)\n- GET /referral/status - Check if device has redeemed\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(xargs:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}

@@ -21,7 +21,19 @@ from sqlalchemy.orm import DeclarativeBase
 # Database Setup
 # -------------------------------------------------------------------
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./referrals.db")
+# Get DATABASE_URL and convert for async SQLAlchemy
+_raw_db_url = os.getenv("DATABASE_URL", "")
+if _raw_db_url:
+    # Render uses postgres:// but SQLAlchemy async needs postgresql+asyncpg://
+    if _raw_db_url.startswith("postgres://"):
+        DATABASE_URL = _raw_db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif _raw_db_url.startswith("postgresql://"):
+        DATABASE_URL = _raw_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    else:
+        DATABASE_URL = _raw_db_url
+else:
+    # Fallback to SQLite for local development
+    DATABASE_URL = "sqlite+aiosqlite:///./referrals.db"
 
 
 class Base(DeclarativeBase):
