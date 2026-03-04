@@ -626,6 +626,17 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/debug/config")
+async def debug_config():
+    """Debug endpoint to check configuration (remove in production)."""
+    return {
+        "pf_api_key_set": bool(PF_API_KEY),
+        "pf_api_key_length": len(PF_API_KEY) if PF_API_KEY else 0,
+        "pf_api_key_preview": f"{PF_API_KEY[:8]}...{PF_API_KEY[-4:]}" if PF_API_KEY and len(PF_API_KEY) > 12 else "too_short",
+        "pf_base_url": PF_BASE_URL,
+    }
+
+
 # -------------------------------------------------------------------
 # Referral Endpoints
 # -------------------------------------------------------------------
