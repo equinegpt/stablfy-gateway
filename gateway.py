@@ -467,46 +467,71 @@ async def proxy_pf_races(
     meetingId: str = Query(..., description="PF meeting ID"),
 ):
     """
-    Proxy PF races list for a meeting - iOS app calls this instead of PF directly.
-    Tries multiple endpoint variants since PF API can be inconsistent.
+    Proxy PF races for a meeting — used by HK/NZ international meetings only.
+    (AU races come from RA Crawler, not this endpoint.)
+
+    Calls PF /v2/form/meeting (the only PF endpoint that returns race data)
+    and normalises the response: strips bulky runner data (~340KB → ~2KB)
+    and returns payLoad as a flat race list so both iOS and Flutter parse it.
     """
     if not PF_API_KEY:
         raise HTTPException(status_code=500, detail="PF_API_KEY not configured")
 
-    # Candidate PF endpoints (same as iOS client tries)
-    endpoints = [
-        f"{PF_BASE_URL}/v2/form/raceslist",
-        f"{PF_BASE_URL}/v2/form/races",
-        f"{PF_BASE_URL}/v2/form/meetingraces",
-        f"{PF_BASE_URL}/v2/form/meeting/races",
-        f"{PF_BASE_URL}/v2/form/races/list",
-        f"{PF_BASE_URL}/v2/form/raceday",
-        f"{PF_BASE_URL}/v2/form/racecard",
-        f"{PF_BASE_URL}/v2/form/meeting",
-    ]
-
+    url = f"{PF_BASE_URL}/v2/form/meeting"
     params = {
         "apiKey": PF_API_KEY,
         "meetingId": meetingId,
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for url in endpoints:
-            print(f"[GW PF RACES] trying {url} meetingId={meetingId}")
-            try:
-                resp = await client.get(url, params=params)
-                if resp.status_code < 400:
-                    body_text = (resp.text or "").strip()
-                    if body_text:
-                        data = resp.json()
-                        print(f"[GW PF RACES] OK from {url}")
-                        return data
-            except (httpx.RequestError, ValueError):
-                continue
+    print(f"[GW PF RACES] GET {url} meetingId={meetingId}")
 
-    # None worked - return empty
-    print(f"[GW PF RACES] all endpoints failed for meetingId={meetingId}")
-    return []
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        print(f"[GW PF RACES] network error for meetingId={meetingId}: {exc}")
+        return []
+
+    if resp.status_code >= 400:
+        print(f"[GW PF RACES] HTTP {resp.status_code} for meetingId={meetingId}")
+        return []
+
+    try:
+        data = resp.json()
+    except ValueError:
+        print(f"[GW PF RACES] invalid JSON for meetingId={meetingId}")
+        return []
+
+    # PF /v2/form/meeting returns payLoad as a dict: {track, races, ...}
+    payload = data.get("payLoad") if isinstance(data, dict) else None
+    raw_races = []
+    if isinstance(payload, dict):
+        raw_races = payload.get("races") or []
+    elif isinstance(payload, list):
+        raw_races = payload
+
+    if not raw_races:
+        print(f"[GW PF RACES] no races in response for meetingId={meetingId}")
+        return []
+
+    # Strip runner data — apps only need race-level fields.
+    slim_races = []
+    for r in raw_races:
+        slim_races.append({
+            "raceId": r.get("raceId"),
+            "number": r.get("number"),
+            "raceNumber": r.get("number"),
+            "name": r.get("name"),
+            "distance": r.get("distance"),
+            "distance_m": r.get("distance"),
+            "startTime": r.get("startTime"),
+            "startTimeUTC": r.get("startTimeUTC"),
+            "raceClass": r.get("raceClass"),
+            "prizeMoney": r.get("prizeMoney"),
+        })
+
+    print(f"[GW PF RACES] OK meetingId={meetingId} → {len(slim_races)} races")
+    return {"statusCode": 200, "payLoad": slim_races}
 
 
 @app.get(
