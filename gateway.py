@@ -643,6 +643,62 @@ async def proxy_sectionals(
 
 
 # -------------------------------------------------------------------
+# Speed Maps proxy (Punting Form speed maps)
+# -------------------------------------------------------------------
+
+@app.get(
+    "/speedmaps",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_speedmaps(
+    meetingId: int = Query(...),
+    raceNo: int = Query(...),
+):
+    """
+    Proxy speed map data from the PuntingForm Speedmaps endpoint.
+    Returns raw PF JSON — the iOS app handles parsing.
+    """
+    if not PF_API_KEY:
+        raise HTTPException(status_code=500, detail="PF_API_KEY not configured")
+
+    url = "https://api.puntingform.com.au/v2/User/Speedmaps"
+    params = {
+        "meetingId": meetingId,
+        "raceNo": raceNo,
+        "apiKey": PF_API_KEY,
+    }
+
+    print(f"[GW SPEEDMAPS] GET {url} meetingId={meetingId} raceNo={raceNo}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"PF upstream error: {exc}",
+        ) from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=resp.text[:300] or "PF error",
+        )
+
+    body_text = (resp.text or "").strip()
+    if not body_text:
+        raise HTTPException(status_code=502, detail="Empty response from PF")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Invalid JSON from PF")
+
+    print(f"[GW SPEEDMAPS] OK meetingId={meetingId} raceNo={raceNo}")
+    return data
+
+
+# -------------------------------------------------------------------
 # Healthcheck
 # -------------------------------------------------------------------
 
