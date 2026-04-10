@@ -60,18 +60,33 @@ class ReferralRedemption(Base):
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# Track whether the DB is reachable (referrals are non-critical)
+_db_available = False
+
 
 async def get_db():
+    if not _db_available:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="Referral database unavailable")
     async with async_session() as session:
         yield session
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    global _db_available
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        _db_available = True
+    except Exception as e:
+        print(f"[gateway] WARNING: DB connection failed ({e}). Referral endpoints disabled, all other routes OK.")
+        _db_available = False
     yield
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
 
 
 app = FastAPI(
