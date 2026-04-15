@@ -714,6 +714,71 @@ async def proxy_speedmaps(
 
 
 # -------------------------------------------------------------------
+# Racing DB proxy (horse search + profile)
+# -------------------------------------------------------------------
+
+RACING_DB_API_URL = os.getenv("RACING_DB_API_URL", "").rstrip("/")
+
+
+@app.get(
+    "/racing/horse/search",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_horse_search(
+    q: str = Query(..., min_length=2),
+    limit: int = Query(5, le=20),
+):
+    """Proxy horse name search to racing-db API."""
+    if not RACING_DB_API_URL:
+        raise HTTPException(status_code=500, detail="RACING_DB_API_URL not configured")
+
+    url = f"{RACING_DB_API_URL}/api/v1/horse/search"
+    params = {"q": q, "limit": limit}
+
+    print(f"[GW RACING] GET {url} q={q}")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Racing DB error: {exc}") from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+
+    return resp.json()
+
+
+@app.get(
+    "/racing/horse/{horse_code}",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_horse_profile(
+    horse_code: str,
+    form_limit: int = Query(10, le=50),
+):
+    """Proxy horse profile to racing-db API."""
+    if not RACING_DB_API_URL:
+        raise HTTPException(status_code=500, detail="RACING_DB_API_URL not configured")
+
+    url = f"{RACING_DB_API_URL}/api/v1/horse/{horse_code}"
+    params = {"form_limit": form_limit}
+
+    print(f"[GW RACING] GET {url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Racing DB error: {exc}") from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+
+    return resp.json()
+
+
+# -------------------------------------------------------------------
 # Healthcheck
 # -------------------------------------------------------------------
 
