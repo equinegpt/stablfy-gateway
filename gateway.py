@@ -11,6 +11,7 @@ from datetime import date as _date, datetime
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Depends, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import Column, String, DateTime, ForeignKey, select, func
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -93,6 +94,20 @@ app = FastAPI(
     title="Stablfy Gateway",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# CORS — allow web app origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8080",
+        "http://localhost:3000",
+        "https://app.puntingform.com.au",
+        "https://punting-form-web.onrender.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # -------------------------------------------------------------------
