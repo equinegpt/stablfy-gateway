@@ -565,6 +565,54 @@ async def proxy_pf_races(
 
 
 @app.get(
+    "/pf/form",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_pf_form(
+    meetingId: int = Query(..., description="PF meeting ID"),
+    raceNumber: int = Query(0, description="Race number (0 = all races)"),
+    runs: int = Query(3, description="Historical runs per horse (max 10)"),
+):
+    """
+    Proxy PF Form API — full race card with jockey, trainer, weight, barrier, form.
+    Returns raw PF JSON.
+    """
+    if not PF_API_KEY:
+        raise HTTPException(status_code=500, detail="PF_API_KEY not configured")
+
+    url = "https://api.puntingform.com.au/v2/form/form"
+    params = {
+        "meetingId": meetingId,
+        "raceNumber": raceNumber,
+        "runs": runs,
+        "apiKey": PF_API_KEY,
+    }
+
+    print(f"[GW PF FORM] GET {url} meetingId={meetingId} raceNumber={raceNumber}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"PF upstream error: {exc}") from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:300] or "PF error")
+
+    body_text = (resp.text or "").strip()
+    if not body_text:
+        raise HTTPException(status_code=502, detail="Empty response from PF")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Invalid JSON from PF")
+
+    print(f"[GW PF FORM] OK meetingId={meetingId} raceNumber={raceNumber} runners={len(data.get('payLoad', []))}")
+    return data
+
+
+@app.get(
     "/pf/sectionals",
     dependencies=[Depends(verify_app_token)],
 )
