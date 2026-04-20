@@ -133,6 +133,8 @@ SKYNET_PF_URL = os.getenv(
 
 PF_API_KEY = os.getenv("PF_API_KEY", "c867b2f9-d740-4cce-b772-801708c8191d")
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
 # -------------------------------------------------------------------
 # Simple header auth for the app
 # -------------------------------------------------------------------
@@ -431,6 +433,82 @@ async def proxy_gemini_chat(req: IreelChatRequest) -> IreelChatResponse:
         response=response_text,
         raw={"source": "gemini", "conversation_id": conv_id},
     )
+
+
+# -------------------------------------------------------------------
+# Gemini proxy (for Punting Form web app)
+# -------------------------------------------------------------------
+
+class GeminiChatRequest(BaseModel):
+    prompt: str
+    system_context: Optional[str] = None
+
+class GeminiChatResponse(BaseModel):
+    response: str
+
+@app.post(
+    "/gemini/chat",
+    response_model=GeminiChatResponse,
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_gemini_chat(req: GeminiChatRequest) -> GeminiChatResponse:
+    """
+    Proxy chat requests to Google Gemini API.
+    Used by the Punting Form web app for AI analysis.
+    """
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+
+    # Build Gemini request
+    contents = []
+    if req.system_context:
+        contents.append({
+            "role": "user",
+            "parts": [{"text": f"System instructions: {req.system_context}"}]
+        })
+        contents.append({
+            "role": "model",
+            "parts": [{"text": "Understood. I'll follow these instructions."}]
+        })
+    contents.append({
+        "role": "user",
+        "parts": [{"text": req.prompt}]
+    })
+
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 2048,
+        }
+    }
+
+    print(f"[GW GEMINI] prompt length={len(req.prompt)}")
+
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            resp = await client.post(url, json=payload)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini upstream error: {exc}") from exc
+
+    if resp.status_code >= 400:
+        print(f"[GW GEMINI] Error {resp.status_code}: {resp.text[:300]}")
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:300] or "Gemini error")
+
+    try:
+        data = resp.json()
+        # Extract text from Gemini response
+        candidates = data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = " ".join(p.get("text", "") for p in parts).strip()
+            print(f"[GW GEMINI] OK, response length={len(text)}")
+            return GeminiChatResponse(response=text)
+        raise HTTPException(status_code=502, detail="No candidates in Gemini response")
+    except (ValueError, KeyError, IndexError) as exc:
+        raise HTTPException(status_code=502, detail=f"Invalid Gemini response: {exc}")
 
 
 # -------------------------------------------------------------------
