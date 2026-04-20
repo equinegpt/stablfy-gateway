@@ -119,6 +119,10 @@ APP_TOKEN = os.getenv("APP_TOKEN", "")
 IREEL_API_KEY = os.getenv("IREEL_API_KEY", "")
 IREEL_BASE_URL = os.getenv("IREEL_BASE_URL", "https://api.ireel.ai/chat")
 
+STABLFY_API_URL = os.getenv("STABLFY_API_URL", "https://api.stablfy.com")
+STABLFY_USERNAME = os.getenv("STABLFY_USERNAME", "")
+STABLFY_PASSWORD = os.getenv("STABLFY_PASSWORD", "")
+
 SKYNET_BASE_URL = os.getenv("SKYNET_BASE_URL", "")
 SKYNET_API_KEY = os.getenv("SKYNET_API_KEY", "")
 
@@ -278,6 +282,156 @@ async def proxy_ireel_chat(req: IreelChatRequest) -> IreelChatResponse:
         response=data.get("response", "") or "",
         raw=data,
     )
+
+
+# -------------------------------------------------------------------
+# Gemini AI chat (via Stablfy API — replaces iReel)
+# -------------------------------------------------------------------
+
+# In-memory token cache for Gemini auth
+_gemini_token: Optional[str] = None
+
+
+async def _gemini_login() -> str:
+    """Login to Stablfy API and return bearer token."""
+    global _gemini_token
+    if not STABLFY_USERNAME or not STABLFY_PASSWORD:
+        raise HTTPException(status_code=500, detail="STABLFY_USERNAME/PASSWORD not configured")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{STABLFY_API_URL}/api/common/account/login",
+            json={"userName": STABLFY_USERNAME, "password": STABLFY_PASSWORD},
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "https://admin.stablfy.com",
+                "Referer": "https://admin.stablfy.com/",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _gemini_token = data["token"]
+        print(f"[GW GEMINI] Logged in as {data.get('firstName', '?')}")
+        return _gemini_token
+
+
+async def _gemini_auth_headers() -> Dict[str, str]:
+    """Get auth headers, logging in if needed."""
+    global _gemini_token
+    if not _gemini_token:
+        await _gemini_login()
+    return {
+        "Authorization": f"Bearer {_gemini_token}",
+        "Content-Type": "application/json",
+        "Origin": "https://admin.stablfy.com",
+        "Referer": "https://admin.stablfy.com/",
+    }
+
+
+@app.post(
+    "/gemini/chat",
+    response_model=IreelChatResponse,
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_gemini_chat(req: IreelChatRequest) -> IreelChatResponse:
+    """
+    Gemini AI chat endpoint — replaces iReel for live app calls.
+
+    Uses the Stablfy API (create conversation → poll for response).
+    Returns the same response shape as /ireel/chat for compatibility.
+    """
+    if not STABLFY_API_URL or not STABLFY_USERNAME:
+        raise HTTPException(status_code=500, detail="Gemini not configured")
+
+    headers = await _gemini_auth_headers()
+    base = STABLFY_API_URL.rstrip("/")
+
+    # 1) Create conversation
+    title = f"App: {req.prompt[:50]}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{base}/api/admin/ai/conversations",
+                json={"kind": 0, "title": title, "initialMessage": req.prompt},
+                headers=headers,
+            )
+
+            # Re-login on 401
+            if resp.status_code == 401:
+                headers = await _gemini_auth_headers()
+                resp = await client.post(
+                    f"{base}/api/admin/ai/conversations",
+                    json={"kind": 0, "title": title, "initialMessage": req.prompt},
+                    headers=headers,
+                )
+
+            resp.raise_for_status()
+            conv = resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
+
+    conv_id = conv.get("id")
+    if not conv_id:
+        raise HTTPException(status_code=502, detail="Failed to create Gemini conversation")
+
+    print(f"[GW GEMINI] Created conversation {conv_id}")
+
+    # 2) Poll for response (max 120s)
+    import asyncio
+    response_text = ""
+    poll_start = time.time()
+
+    try:
+        while time.time() - poll_start < 120:
+            await asyncio.sleep(3)
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                poll_resp = await client.get(
+                    f"{base}/api/admin/ai/conversations/{conv_id}",
+                    headers=headers,
+                )
+                if poll_resp.status_code != 200:
+                    continue
+
+                conv_data = poll_resp.json()
+                messages = conv_data.get("messages", [])
+
+                for msg in messages:
+                    if msg.get("role") == 1:  # assistant
+                        status = msg.get("status", 0)
+                        if status == 2:  # succeeded
+                            response_text = msg.get("content", "")
+                            elapsed = time.time() - poll_start
+                            print(f"[GW GEMINI] Response in {elapsed:.1f}s")
+                            break
+                        elif status == 3:  # failed
+                            raise HTTPException(
+                                status_code=502,
+                                detail="Gemini AI failed to respond",
+                            )
+
+                if response_text:
+                    break
+
+        if not response_text:
+            raise HTTPException(status_code=504, detail="Gemini timeout (120s)")
+
+    finally:
+        # 3) Cleanup conversation
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.delete(
+                    f"{base}/api/admin/ai/conversations/{conv_id}",
+                    headers=headers,
+                )
+        except Exception:
+            pass
+
+    return IreelChatResponse(
+        response=response_text,
+        raw={"source": "gemini", "conversation_id": conv_id},
+    )
+
 
 # -------------------------------------------------------------------
 # SkyNet proxy
