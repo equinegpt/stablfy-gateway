@@ -10,7 +10,7 @@ import datetime as dt
 from datetime import date as _date, datetime
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Depends, Query
+from fastapi import FastAPI, HTTPException, Header, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import Column, String, DateTime, ForeignKey, select, func
@@ -1071,6 +1071,57 @@ async def proxy_horse_profile(
         raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
 
     return resp.json()
+
+
+# -------------------------------------------------------------------
+# TRS proxy (Tips Results Service — for web app CORS)
+# -------------------------------------------------------------------
+
+TRS_BASE_URL = os.getenv("TRS_BASE_URL", "https://tips-results-service.onrender.com")
+
+@app.get(
+    "/trs/tips",
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_trs_tips(date: str = Query(...)):
+    """Proxy TRS tips endpoint — adds CORS for web app."""
+    url = f"{TRS_BASE_URL}/tips"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params={"date": date})
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+        return resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"TRS error: {exc}") from exc
+
+
+# -------------------------------------------------------------------
+# CAS proxy (Canned Answers Service — for web app CORS)
+# -------------------------------------------------------------------
+
+CAS_BASE_URL = os.getenv("CAS_BASE_URL", "https://canned-answers-service.onrender.com")
+
+@app.api_route(
+    "/cas/{path:path}",
+    methods=["GET", "POST"],
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_cas(path: str, request: Request):
+    """Proxy all CAS requests — adds CORS for web app."""
+    url = f"{CAS_BASE_URL}/{path}"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if request.method == "POST":
+                body = await request.body()
+                resp = await client.post(url, content=body, headers={"Content-Type": "application/json"})
+            else:
+                resp = await client.get(url, params=dict(request.query_params))
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+        return resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"CAS error: {exc}") from exc
 
 
 # -------------------------------------------------------------------
