@@ -1117,9 +1117,13 @@ async def proxy_cas(path: str, request: Request):
                 resp = await client.post(url, content=body, headers={"Content-Type": "application/json"})
             else:
                 resp = await client.get(url, params=dict(request.query_params))
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
-        return resp.json()
+        # Pass through the response as-is (let client handle 404 cache misses)
+        from starlette.responses import Response
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"CAS error: {exc}") from exc
 
