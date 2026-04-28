@@ -169,6 +169,108 @@ class IreelChatResponse(BaseModel):
     raw: Dict[str, Any]            # full iReel JSON if needed
 
 
+# -------------------------------------------------------------------
+# SignalR token broker — issues short-lived JWT for direct Stablfy API
+# -------------------------------------------------------------------
+
+class SignalRTokenResponse(BaseModel):
+    token: str
+    hub_url: str
+    expires_in: int  # seconds until token expires (approximate)
+
+
+# Simple rate limiter: track last token issue per app-token
+_token_issue_times: Dict[str, float] = {}
+_TOKEN_COOLDOWN_SECONDS = 30  # min seconds between token requests
+
+
+@app.post(
+    "/auth/signalr-token",
+    response_model=SignalRTokenResponse,
+    dependencies=[Depends(verify_app_token)],
+)
+async def issue_signalr_token(x_app_token: str = Header(...)) -> SignalRTokenResponse:
+    """
+    Token broker: app authenticates with APP_TOKEN, gateway logs into
+    Stablfy API with server-side credentials, returns a short-lived JWT
+    for the app to use with the SignalR hub directly.
+
+    Security:
+    - Stablfy credentials (username/password) never leave the server
+    - App only receives a short-lived JWT (Stablfy controls TTL)
+    - Refresh token is NOT returned — app must come back here for a new JWT
+    - Rate limited to prevent abuse (one token per 30 seconds per client)
+    """
+    if not STABLFY_API_URL or not STABLFY_USERNAME or not STABLFY_PASSWORD:
+        raise HTTPException(
+            status_code=500,
+            detail="Stablfy API credentials not configured on gateway",
+        )
+
+    # Rate limit: prevent rapid token requests
+    now = time.time()
+    last_issue = _token_issue_times.get(x_app_token, 0)
+    if now - last_issue < _TOKEN_COOLDOWN_SECONDS:
+        remaining = int(_TOKEN_COOLDOWN_SECONDS - (now - last_issue))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Token rate limited. Try again in {remaining}s.",
+        )
+
+    # Login to Stablfy API
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{STABLFY_API_URL}/api/common/account/login",
+                json={
+                    "userName": STABLFY_USERNAME,
+                    "password": STABLFY_PASSWORD,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": "https://admin.stablfy.com",
+                    "Referer": "https://admin.stablfy.com/",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        print(f"[GW AUTH] Stablfy login failed: {exc.response.status_code}")
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to authenticate with Stablfy API",
+        )
+    except Exception as exc:
+        print(f"[GW AUTH] Stablfy login error: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail="Stablfy API unreachable",
+        )
+
+    token = data.get("token")
+    if not token:
+        raise HTTPException(
+            status_code=502,
+            detail="No token in Stablfy login response",
+        )
+
+    # Record issue time for rate limiting
+    _token_issue_times[x_app_token] = now
+
+    # TTL from Stablfy response (seconds), default to 3600 if not provided
+    ttl = data.get("ttl", 3600)
+
+    hub_url = f"{STABLFY_API_URL}/hubs/ai"
+
+    print(f"[GW AUTH] Issued SignalR token (TTL={ttl}s)")
+
+    return SignalRTokenResponse(
+        token=token,
+        hub_url=hub_url,
+        expires_in=int(ttl),
+    )
+
+
 class SkynetPricesRequest(BaseModel):
     # iOS sends: { "date": "2025-12-05" }
     date: str  # ISO day "YYYY-MM-DD"
