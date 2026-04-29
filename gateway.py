@@ -123,6 +123,10 @@ STABLFY_API_URL = os.getenv("STABLFY_API_URL", "https://api.stablfy.com")
 STABLFY_USERNAME = os.getenv("STABLFY_USERNAME", "")
 STABLFY_PASSWORD = os.getenv("STABLFY_PASSWORD", "")
 
+# Cached Stablfy JWT (refreshed when expired)
+_stablfy_token: Optional[str] = None
+_stablfy_token_expiry: float = 0
+
 SKYNET_BASE_URL = os.getenv("SKYNET_BASE_URL", "")
 SKYNET_API_KEY = os.getenv("SKYNET_API_KEY", "")
 
@@ -1228,6 +1232,123 @@ async def proxy_cas(path: str, request: Request):
         )
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"CAS error: {exc}") from exc
+
+
+# -------------------------------------------------------------------
+# Stablfy AI chat proxy (server-side auth — no client login needed)
+# -------------------------------------------------------------------
+
+async def _get_stablfy_token() -> str:
+    """Get a valid Stablfy JWT, logging in if needed."""
+    global _stablfy_token, _stablfy_token_expiry
+
+    if _stablfy_token and time.time() < _stablfy_token_expiry:
+        return _stablfy_token
+
+    if not STABLFY_USERNAME or not STABLFY_PASSWORD:
+        raise HTTPException(status_code=500, detail="STABLFY credentials not configured")
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{STABLFY_API_URL}/api/common/account/login",
+            json={"userName": STABLFY_USERNAME, "password": STABLFY_PASSWORD},
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Stablfy login failed: {resp.status_code}")
+
+    data = resp.json()
+    _stablfy_token = data.get("token")
+    ttl = data.get("ttl", 1200)  # default 20 min
+    _stablfy_token_expiry = time.time() + (ttl * 0.8)  # refresh at 80%
+
+    print(f"[GW STABLFY] Logged in, token valid for {ttl}s")
+    return _stablfy_token
+
+
+class StablfyChatRequest(BaseModel):
+    prompt: str
+
+
+class StablfyChatResponse(BaseModel):
+    response: str
+
+
+@app.post(
+    "/stablfy/chat",
+    response_model=StablfyChatResponse,
+    dependencies=[Depends(verify_app_token)],
+)
+async def proxy_stablfy_chat(req: StablfyChatRequest) -> StablfyChatResponse:
+    """
+    Send a prompt to Stablfy AI — handles auth, conversation lifecycle, polling.
+    No client-side login needed. Gateway authenticates with its own credentials.
+    """
+    token = await _get_stablfy_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    print(f"[GW STABLFY CHAT] prompt length={len(req.prompt)}")
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        # 1. Create conversation with initial message
+        create_resp = await client.post(
+            f"{STABLFY_API_URL}/api/admin/ai/conversations",
+            headers=headers,
+            json={"kind": 0, "initialMessage": req.prompt},
+        )
+
+        if create_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Create conversation failed: {create_resp.status_code}")
+
+        conv = create_resp.json()
+        conv_id = conv.get("id")
+        if not conv_id:
+            raise HTTPException(status_code=502, detail="No conversation ID returned")
+
+        print(f"[GW STABLFY CHAT] Created conv {conv_id}")
+
+        # 2. Poll until assistant responds
+        import asyncio
+        for _ in range(60):  # max 120 seconds (60 * 2s)
+            await asyncio.sleep(2)
+
+            poll_resp = await client.get(
+                f"{STABLFY_API_URL}/api/admin/ai/conversations/{conv_id}",
+                headers=headers,
+            )
+
+            if poll_resp.status_code != 200:
+                continue
+
+            poll_data = poll_resp.json()
+            messages = poll_data.get("messages", [])
+
+            # Find last assistant message
+            for msg in reversed(messages):
+                if msg.get("role") == 1:  # assistant
+                    status = msg.get("status", 0)
+                    if status == 2:  # succeeded
+                        content = msg.get("content", "")
+                        print(f"[GW STABLFY CHAT] OK conv {conv_id}, response length={len(content)}")
+
+                        # 3. Cleanup — delete conversation
+                        try:
+                            await client.delete(
+                                f"{STABLFY_API_URL}/api/admin/ai/conversations/{conv_id}",
+                                headers=headers,
+                            )
+                        except Exception:
+                            pass
+
+                        return StablfyChatResponse(response=content)
+
+                    if status == 3:  # failed
+                        content = msg.get("content", "Processing failed")
+                        raise HTTPException(status_code=502, detail=content)
+                    break  # found assistant msg but still processing
+
+        # Timeout
+        raise HTTPException(status_code=504, detail="AI response timed out")
 
 
 # -------------------------------------------------------------------
