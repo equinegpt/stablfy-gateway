@@ -1451,6 +1451,31 @@ async def referral_stats(
     )
 
 
+@app.delete("/referral/clear-redemption")
+async def clear_referral_redemption(
+    secret: str = Query(...),
+    device_prefix: str = Query(..., description="First 8+ chars of device ID"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: clear a referral redemption so the device can redeem again."""
+    if secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid admin secret")
+
+    result = await db.execute(
+        select(ReferralRedemption).where(
+            ReferralRedemption.redeemer_device_id.startswith(device_prefix)
+        )
+    )
+    redemption = result.scalar_one_or_none()
+    if not redemption:
+        return {"cleared": False, "message": f"No redemption found for device prefix '{device_prefix}'"}
+
+    device_id = redemption.redeemer_device_id
+    await db.delete(redemption)
+    await db.commit()
+    return {"cleared": True, "device_id": device_id[:8] + "..."}
+
+
 from fastapi.responses import HTMLResponse
 
 
