@@ -637,6 +637,7 @@ class SkynetPrice(BaseModel):
 
     # Runner-level info
     tabNumber: int                   # TAB no
+    horse: str | None = None         # Runner name (added so TRS can synthesise tips)
     price: float | None = None       # AI fair price
     tabCurrentPrice: float | None = None  # TAB price
     rank: int | None = None          # model rank (if PF sends it)
@@ -740,6 +741,13 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
                 tab_no = row.get("tabNo") or row.get("tabNumber")
                 race_no = row.get("raceNo") or row.get("raceNumber")
                 track_name = row.get("venue") or row.get("track")
+                horse_name = (
+                    row.get("horse")
+                    or row.get("horseName")
+                    or row.get("runner")
+                    or row.get("runnerName")
+                    or row.get("name")
+                )
 
                 # Need at least race + TAB to be useful
                 if tab_no is None or race_no is None:
@@ -750,6 +758,7 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
                         track=track_name,
                         raceNumber=int(race_no),
                         tabNumber=int(tab_no),
+                        horse=horse_name,
                         price=row.get("aiPrice") or row.get("price"),
                         tabCurrentPrice=row.get("tabPrice") or row.get("tabCurrentPrice"),
                         rank=row.get("rank"),
