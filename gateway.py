@@ -685,8 +685,10 @@ async def proxy_skynet_prices(req: SkynetPricesRequest):
 
     last_exc: Exception | None = None
 
+    # Upstream is slow on big race days (Sat ~45-60s for 20+ tracks).
+    # Bumped read timeout from 35s to 90s.
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(35.0, connect=10.0, read=35.0)
+        timeout=httpx.Timeout(90.0, connect=10.0, read=90.0)
     ) as client:
         for meeting_date in date_variants:
             params = {
