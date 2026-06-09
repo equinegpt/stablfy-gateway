@@ -423,9 +423,11 @@ async def _gemini_login() -> str:
         return _gemini_token
 
 
-async def _gemini_auth_headers() -> Dict[str, str]:
-    """Get auth headers, logging in if needed."""
+async def _gemini_auth_headers(force_refresh: bool = False) -> Dict[str, str]:
+    """Get auth headers, logging in if needed (or forced)."""
     global _gemini_token
+    if force_refresh:
+        _gemini_token = None
     if not _gemini_token:
         await _gemini_login()
     return {
@@ -464,9 +466,10 @@ async def proxy_gemini_chat(req: IreelChatRequest) -> IreelChatResponse:
                 headers=headers,
             )
 
-            # Re-login on 401
+            # Re-login on 401 (token expired) and retry once
             if resp.status_code == 401:
-                headers = await _gemini_auth_headers()
+                print("[GW GEMINI] 401 on create — refreshing token and retrying")
+                headers = await _gemini_auth_headers(force_refresh=True)
                 resp = await client.post(
                     f"{base}/api/admin/ai/conversations",
                     json={"kind": 0, "title": title, "initialMessage": req.prompt},
@@ -475,6 +478,13 @@ async def proxy_gemini_chat(req: IreelChatRequest) -> IreelChatResponse:
 
             resp.raise_for_status()
             conv = resp.json()
+    except httpx.HTTPStatusError as exc:
+        body = (exc.response.text or "")[:200]
+        print(f"[GW GEMINI] upstream {exc.response.status_code}: {body}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini upstream {exc.response.status_code}: {body}",
+        ) from exc
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Gemini error: {exc}") from exc
 
@@ -498,6 +508,14 @@ async def proxy_gemini_chat(req: IreelChatRequest) -> IreelChatResponse:
                     f"{base}/api/admin/ai/conversations/{conv_id}",
                     headers=headers,
                 )
+                # Token expired mid-poll — refresh and retry
+                if poll_resp.status_code == 401:
+                    print("[GW GEMINI] 401 on poll — refreshing token")
+                    headers = await _gemini_auth_headers(force_refresh=True)
+                    poll_resp = await client.get(
+                        f"{base}/api/admin/ai/conversations/{conv_id}",
+                        headers=headers,
+                    )
                 if poll_resp.status_code != 200:
                     continue
 
