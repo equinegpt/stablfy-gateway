@@ -1,0 +1,138 @@
+"""Horse deep-dive transforms — pure functions, no I/O.
+
+racing-db `/api/v1/horse/{code}` returns the full profile (career, form,
+track/condition/distance breakdowns, jockey/trainer rolling stats) — we just
+pass it through into Pydantic models.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from nm_v1.models import (
+    CareerStats,
+    ConditionStat,
+    DistanceStat,
+    HorseDeepDive,
+    HorseInfo,
+    HorseStart,
+    PersonStats,
+    StatBreakdown,
+    TrackStat,
+)
+
+
+def pick_best_match(name: str, candidates: list[dict]) -> dict | None:
+    if not candidates:
+        return None
+    target = name.strip().lower()
+    exact = [c for c in candidates if (c.get("name") or "").strip().lower() == target]
+    pool = exact or candidates
+    return max(pool, key=lambda c: c.get("career_starts") or c.get("career_wins") or 0)
+
+
+def build_deep_dive(record: dict[str, Any], form_limit: int = 10) -> HorseDeepDive | None:
+    horse = record.get("horse") or {}
+    code = horse.get("horse_code")
+    if not code:
+        return None
+
+    form_in = record.get("form") or []
+    form = [
+        HorseStart(
+            race_date=f.get("race_date"),
+            track=f.get("track"),
+            state=f.get("state"),
+            distance=f.get("distance"),
+            race_class=f.get("race_class"),
+            track_condition=f.get("track_condition"),
+            position=f.get("position"),
+            field_size=f.get("field_size"),
+            margin=f.get("margin"),
+            barrier=f.get("barrier"),
+            weight=f.get("weight"),
+            handicap_rating=f.get("handicap_rating"),
+            jockey=f.get("jockey"),
+            odds=f.get("odds_closing"),
+            last_600m=f.get("last_600m"),
+        )
+        for f in form_in[:form_limit]
+    ]
+
+    return HorseDeepDive(
+        horse=HorseInfo(
+            horse_code=str(code),
+            name=horse.get("name") or "",
+            sex=horse.get("sex"),
+            colour=horse.get("colour"),
+            dob=horse.get("dob"),
+            country=horse.get("country"),
+            sire_name=horse.get("sire_name"),
+            dam_name=horse.get("dam_name"),
+            sire_of_dam=horse.get("sire_of_dam"),
+            trainer_name=horse.get("trainer_name"),
+            owner=horse.get("owner"),
+        ),
+        career=_career(record.get("career") or {}),
+        form=form,
+        track_stats=[_track(s) for s in (record.get("track_stats") or [])],
+        condition_stats=[_condition(s) for s in (record.get("condition_stats") or [])],
+        distance_stats=[_distance(s) for s in (record.get("distance_stats") or [])],
+        jockey_stats=_person(record.get("jockey_stats")),
+        trainer_stats=_person(record.get("trainer_stats")),
+    )
+
+
+def _career(c: dict) -> CareerStats:
+    return CareerStats(
+        starts=c.get("starts") or 0,
+        wins=c.get("wins") or 0,
+        seconds=c.get("seconds") or 0,
+        thirds=c.get("thirds") or 0,
+        prizemoney=c.get("prizemoney") or 0.0,
+        best_rating=c.get("best_rating"),
+    )
+
+
+def _track(s: dict) -> TrackStat:
+    return TrackStat(
+        track=s.get("track") or "",
+        distance=s.get("distance"),
+        runs=s.get("runs") or 0,
+        wins=s.get("wins") or 0,
+        places=s.get("places") or 0,
+    )
+
+
+def _condition(s: dict) -> ConditionStat:
+    return ConditionStat(
+        condition=s.get("condition") or "",
+        runs=s.get("runs") or 0,
+        wins=s.get("wins") or 0,
+        places=s.get("places") or 0,
+    )
+
+
+def _distance(s: dict) -> DistanceStat:
+    return DistanceStat(
+        category=s.get("category") or "",
+        runs=s.get("runs") or 0,
+        wins=s.get("wins") or 0,
+        places=s.get("places") or 0,
+    )
+
+
+def _person(p: dict | None) -> PersonStats | None:
+    if not p:
+        return None
+    return PersonStats(
+        name=p.get("name") or "",
+        this_track=_breakdown(p.get("this_track")),
+        this_distance=_breakdown(p.get("this_distance")),
+        last_30_days=_breakdown(p.get("last_30_days")),
+    )
+
+
+def _breakdown(b: dict | None) -> StatBreakdown:
+    if not b:
+        return StatBreakdown()
+    return StatBreakdown(starts=b.get("starts") or 0, wins=b.get("wins") or 0)

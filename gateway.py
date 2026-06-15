@@ -1381,6 +1381,19 @@ async def proxy_stablfy_chat(req: StablfyChatRequest) -> StablfyChatResponse:
 
 
 # -------------------------------------------------------------------
+# No Mugs Punting (v1) — aggregator routes for the NO MUGS iOS app
+# Lifted from the standalone no-mugs-gateway repo; see nm_v1/__init__.py.
+# -------------------------------------------------------------------
+
+from nm_v1 import build_router as _build_nm_router
+
+app.include_router(
+    _build_nm_router(),
+    dependencies=[Depends(verify_app_token)],
+)
+
+
+# -------------------------------------------------------------------
 # Healthcheck
 # -------------------------------------------------------------------
 
