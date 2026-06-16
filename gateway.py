@@ -1385,11 +1385,25 @@ async def proxy_stablfy_chat(req: StablfyChatRequest) -> StablfyChatResponse:
 # Lifted from the standalone no-mugs-gateway repo; see nm_v1/__init__.py.
 # -------------------------------------------------------------------
 
+from fastapi import Response as _NMResponse
+
 from nm_v1 import build_router as _build_nm_router
+
+
+def _nm_no_store(response: _NMResponse) -> None:
+    """Force no-store on every /v1/* response.
+
+    iOS `URLCache.shared` will silently cache JSON responses past the app's
+    own staleness checks unless the server explicitly tells it not to —
+    so picks data on Mugs / Rank / Agreement can show stale top-3s on a
+    flaky network. See feedback_ios_urlcache_stale memory.
+    """
+    response.headers["Cache-Control"] = "no-store"
+
 
 app.include_router(
     _build_nm_router(),
-    dependencies=[Depends(verify_app_token)],
+    dependencies=[Depends(verify_app_token), Depends(_nm_no_store)],
 )
 
 
