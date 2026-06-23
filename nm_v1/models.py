@@ -168,6 +168,59 @@ class CareerStats(BaseModel):
     best_rating: int | None = None
 
 
+class SaleHistoryEntry(BaseModel):
+    sale_code: str
+    sale_house: str | None = None
+    sale_name: str | None = None
+    sale_year: int | None = None
+    sale_type: str | None = None
+    lot_number: str | None = None
+    price: float | None = None
+    sale_status: str | None = None
+    buyer: str | None = None
+    vendor: str | None = None
+    match_method: str | None = None
+    match_confidence: float | None = None
+
+
+class BiomechScore(BaseModel):
+    sale_code: str | None = None
+    lot_number: str | None = None
+    # TOP / MID / BOT — or null when unscored
+    tier: str | None = None
+    # Net: n_out - n_under across the 12 features (-12 to +12)
+    net: int | None = None
+    n_out: int | None = None
+    n_under: int | None = None
+    n_neutral: int | None = None
+    # Extraction quality
+    n_trusted_sections: int | None = None
+    total_trusted_seconds: float | None = None
+    scorecard_version: str | None = None
+    scored_at: str | None = None
+
+
+class BiomechSireContext(BaseModel):
+    """Sire-cohort context for placing one horse's biomech in perspective."""
+    n_scored: int
+    median_net: float | None = None
+    pct_top: float | None = None
+    pct_bot: float | None = None
+
+
+class HorseSearchResult(BaseModel):
+    horse_code: str
+    name: str
+    sire_name: str | None = None
+    dam_name: str | None = None
+    sex: str | None = None
+    colour: str | None = None
+    trainer_name: str | None = None
+    career_starts: int | None = None
+    career_wins: int | None = None
+    career_prizemoney: float | None = None
+
+
 class HorseDeepDive(BaseModel):
     horse: HorseInfo
     career: CareerStats
@@ -177,6 +230,9 @@ class HorseDeepDive(BaseModel):
     distance_stats: list[DistanceStat] = []
     jockey_stats: PersonStats | None = None
     trainer_stats: PersonStats | None = None
+    sale_history: list[SaleHistoryEntry] = []
+    biomech: BiomechScore | None = None
+    biomech_sire_context: BiomechSireContext | None = None
 
 
 class PastRun(BaseModel):

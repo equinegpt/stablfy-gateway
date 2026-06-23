@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Any
 
 from nm_v1.models import (
+    BiomechScore,
+    BiomechSireContext,
     CareerStats,
     ConditionStat,
     DistanceStat,
@@ -16,6 +18,7 @@ from nm_v1.models import (
     HorseInfo,
     HorseStart,
     PersonStats,
+    SaleHistoryEntry,
     StatBreakdown,
     TrackStat,
 )
@@ -79,6 +82,9 @@ def build_deep_dive(record: dict[str, Any], form_limit: int = 10) -> HorseDeepDi
         distance_stats=[_distance(s) for s in (record.get("distance_stats") or [])],
         jockey_stats=_person(record.get("jockey_stats")),
         trainer_stats=_person(record.get("trainer_stats")),
+        sale_history=[_sale(s) for s in (record.get("sale_history") or [])],
+        biomech=_biomech(record.get("biomech")),
+        biomech_sire_context=_biomech_sire(record.get("biomech_sire_context")),
     )
 
 
@@ -136,3 +142,49 @@ def _breakdown(b: dict | None) -> StatBreakdown:
     if not b:
         return StatBreakdown()
     return StatBreakdown(starts=b.get("starts") or 0, wins=b.get("wins") or 0)
+
+
+def _sale(s: dict) -> SaleHistoryEntry:
+    return SaleHistoryEntry(
+        sale_code=s.get("sale_code") or "",
+        sale_house=s.get("sale_house"),
+        sale_name=s.get("sale_name"),
+        sale_year=s.get("sale_year"),
+        sale_type=s.get("sale_type"),
+        lot_number=s.get("lot_number"),
+        price=s.get("price"),
+        sale_status=s.get("sale_status"),
+        buyer=s.get("buyer"),
+        vendor=s.get("vendor"),
+        match_method=s.get("match_method"),
+        match_confidence=s.get("match_confidence"),
+    )
+
+
+def _biomech(b: dict | None) -> BiomechScore | None:
+    if not b:
+        return None
+    return BiomechScore(
+        sale_code=b.get("sale_code"),
+        lot_number=b.get("lot_number"),
+        tier=b.get("tier"),
+        net=b.get("net"),
+        n_out=b.get("n_out"),
+        n_under=b.get("n_under"),
+        n_neutral=b.get("n_neutral"),
+        n_trusted_sections=b.get("n_trusted_sections"),
+        total_trusted_seconds=b.get("total_trusted_seconds"),
+        scorecard_version=b.get("scorecard_version"),
+        scored_at=b.get("scored_at"),
+    )
+
+
+def _biomech_sire(c: dict | None) -> BiomechSireContext | None:
+    if not c:
+        return None
+    return BiomechSireContext(
+        n_scored=c.get("n_scored") or 0,
+        median_net=c.get("median_net"),
+        pct_top=c.get("pct_top"),
+        pct_bot=c.get("pct_bot"),
+    )
