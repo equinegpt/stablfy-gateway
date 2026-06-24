@@ -17,6 +17,7 @@ from fastapi import APIRouter
 from nm_v1.routes import (
     agreements,
     ask,
+    breeding,
     build,
     horses,
     mugs,
@@ -41,4 +42,5 @@ def build_router() -> APIRouter:
     router.include_router(rank.router)
     router.include_router(sectionals.router)
     router.include_router(roi.router)
+    router.include_router(breeding.router)
     return router

@@ -235,6 +235,93 @@ class HorseDeepDive(BaseModel):
     biomech_sire_context: BiomechSireContext | None = None
 
 
+# ---------------------------------------------------------------------------
+# Breeding analytics — Research tab (Sharp tier)
+# ---------------------------------------------------------------------------
+# Pass-through shapes for racing-db /api/breeding/*. Models kept thin —
+# nm_v1 doesn't reshape, it just stamps a typed contract over the proxy.
+
+
+class SireLeaderboardRow(BaseModel):
+    name: str
+    runners: int
+    winners: int
+    starts: int
+    wins: int
+    places: int
+    winners_to_runners: float
+    win_pct: float
+    place_pct: float
+    prizemoney: float
+    prize_per_runner: float
+    prize_per_start: float
+    avg_rating: float
+    peak_rating: int | None = None
+    stakes_runners: int
+    stakes_winners: int
+    stakes_placegetters: int
+
+
+class DistanceBandStat(BaseModel):
+    runs: int
+    wins: int
+    pct: float
+
+
+class DistanceDNARow(BaseModel):
+    name: str
+    total_runs: int
+    total_wins: int
+    sprint: DistanceBandStat
+    mile: DistanceBandStat
+    middle: DistanceBandStat
+    staying: DistanceBandStat
+
+
+class NickRow(BaseModel):
+    sire: str
+    broodmare_sire: str
+    runners: int
+    winners: int
+    starts: int
+    wins: int
+    winners_to_runners: float
+    win_pct: float
+    prizemoney: float
+    avg_rating: float | None = None
+    peak_rating: int | None = None
+
+
+class SireSectionalRow(BaseModel):
+    name: str
+    runs: int
+    avg_l600: float | None = None
+    avg_l200: float | None = None
+    avg_l600_wins: float | None = None
+    avg_l200_wins: float | None = None
+    avg_pos_800m: float | None = None
+    avg_pos_400m: float | None = None
+    avg_position_gain: float | None = None
+    wins: int
+
+
+class ClassCeilingRow(BaseModel):
+    name: str
+    runners: int
+    avg_peak_rating: float | None = None
+    top_rating: int | None = None
+    g1_runners: int
+    g1_winners: int
+    g2_runners: int
+    g2_winners: int
+    g3_runners: int
+    g3_winners: int
+    listed_runners: int
+    listed_winners: int
+    pct_stakes_runners: float
+    pct_stakes_winners: float
+
+
 class PastRun(BaseModel):
     """One past-start sectional entry for a runner. Times in seconds; class
     deviations are signed (negative = above class par / sharper)."""
