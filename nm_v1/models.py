@@ -322,6 +322,64 @@ class ClassCeilingRow(BaseModel):
     pct_stakes_winners: float
 
 
+# ---------------------------------------------------------------------------
+# Sales catalogues + parade biomech browser (Research → Sales, Sharp tier)
+# ---------------------------------------------------------------------------
+
+
+class SaleSummary(BaseModel):
+    """One row in /v1/sales — catalogue-level rollup."""
+    sale_code: str
+    sale_house: str | None = None
+    sale_name: str | None = None
+    sale_type: str | None = None
+    sale_year: int | None = None
+    location: str | None = None
+    total_lots: int | None = None
+    total_sold: int | None = None
+    total_passed_in: int | None = None
+    total_withdrawn: int | None = None
+    median_price: float | None = None
+    mean_price: float | None = None
+    total_turnover: float | None = None
+
+
+class SaleDetail(SaleSummary):
+    """`/v1/sale/{code}` adds the metadata fields the index leaves out."""
+    house_code: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    gcs_folder: str | None = None
+    scraped_at: str | None = None
+
+
+class SaleLot(BaseModel):
+    """One lot in /v1/sale/{code}/lots, with biomech tier joined in.
+
+    `biomech_tier` is the Sharp-tier hook: TOP standouts, MID neutral,
+    BOT under-built. `horse_code` is non-null only when the lot matched
+    to a racing horse (so iOS can deep-link to the full profile).
+    """
+    lot_number: str | None = None
+    sire_name: str | None = None
+    dam_name: str | None = None
+    sex: str | None = None
+    colour: str | None = None
+    dob_year: int | None = None
+    vendor: str | None = None
+    buyer: str | None = None
+    buyer_location: str | None = None
+    price: float | None = None
+    sale_status: str | None = None
+    horse_id: int | None = None
+    horse_code: str | None = None
+    horse_name: str | None = None
+    match_method: str | None = None
+    match_confidence: float | None = None
+    biomech_tier: str | None = None
+    biomech_net: int | None = None
+
+
 class PastRun(BaseModel):
     """One past-start sectional entry for a runner. Times in seconds; class
     deviations are signed (negative = above class par / sharper)."""
