@@ -20,6 +20,7 @@ from nm_v1.routes import (
     breeding,
     build,
     horses,
+    iq,
     mugs,
     races,
     rank,
@@ -45,4 +46,5 @@ def build_router() -> APIRouter:
     router.include_router(roi.router)
     router.include_router(breeding.router)
     router.include_router(sales.router)
+    router.include_router(iq.router)
     return router

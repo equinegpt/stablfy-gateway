@@ -353,6 +353,57 @@ class SaleDetail(SaleSummary):
     scraped_at: str | None = None
 
 
+class RaceIQ(BaseModel):
+    """Class+distance winning-rating benchmark from mv_iq_winning_runs.
+
+    `typical_low`/`typical_high` is the p25..p75 of winning ratings in the
+    same class+distance bucket. `avg_win_rating` is the mean. `n` is the
+    historical sample size — small n means a noisy benchmark.
+    """
+    avg_win_rating: float | None = None
+    win_low: int | None = None
+    win_high: int | None = None
+    typical_low: float | None = None
+    typical_high: float | None = None
+    n: int
+
+
+class UpcomingRace(BaseModel):
+    """One row of /v1/iq/upcoming — a forward-looking race card entry
+    overlaid with winning-rating intelligence.
+
+    `competitiveness` is non-null only when the caller passed `?rating=N`,
+    in which case it's one of STRONG | POSSIBLE | OVERQUALIFIED | UNLIKELY.
+    """
+    date: str
+    race_time: str | None = None
+    race_no: int
+    track: str
+    state: str | None = None
+    race_class: str | None = None
+    type: str | None = None
+    condition: str | None = None
+    sex: str | None = None
+    age: str | None = None
+    distance_m: int | None = None
+    band: str | None = None
+    prize: int | float | None = None
+    bonus: bool = False
+    description: str | None = None
+    url: str | None = None
+    iq: RaceIQ | None = None
+    competitiveness: str | None = None
+
+
+class UpcomingRacesResponse(BaseModel):
+    from_: str = Field(alias="from")
+    to: str
+    count: int
+    races: list[UpcomingRace]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class SaleLot(BaseModel):
     """One lot in /v1/sale/{code}/lots, with biomech tier joined in.
 
