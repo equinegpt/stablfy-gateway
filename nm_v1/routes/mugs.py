@@ -1,9 +1,13 @@
-"""Tab 1 — Mugs.
+"""Tab 1 — Mugs. Best of Day + production lane library.
 
-Reuse-first: today's picks come from `/api/curated`. Per-lane rolling SR / ROI
-come from scraping `/best-of-day` HTML (no JSON source yet). Race times come
-from RA Crawler. All upstreams are best-effort — a slow scrape or a missing
-RA Crawler row doesn't break the picks list.
+Reuse-first: today's picks come from /api/curated (no auth) and race
+times come from RA Crawler. Both upstreams are best-effort — a missing
+RA Crawler row just leaves race_time null on the pick.
+
+The old per-lane SR/ROI HTML scrape of /best-of-day was dropped on
+2026-06-30 when stablfy-social locked in the L1/L2/L3/L4 lane system —
+audit numbers are now hard-coded in mugs_today.py from the 9-week
+audit (Apr 23 → Jun 26) and refreshed manually when that audit re-runs.
 """
 from __future__ import annotations
 
@@ -15,11 +19,9 @@ from nm_v1.clients.ra_crawler import RACrawlerError, fetch_races
 from nm_v1.clients.stablfy_social import (
     UpstreamError,
     UpstreamNotFound,
-    fetch_best_of_day_html,
     fetch_curated,
 )
 from nm_v1.models import MugsResponse
-from nm_v1.services.bod_summary import parse_bod_summaries
 from nm_v1.services.mugs_today import build_today
 
 router = APIRouter(prefix="/v1", tags=["mugs"])
@@ -28,7 +30,6 @@ router = APIRouter(prefix="/v1", tags=["mugs"])
 @router.get("/mugs", response_model=MugsResponse)
 async def get_mugs(
     date: str | None = Query(default=None),
-    days: int = Query(default=30, ge=1, le=365),
 ):
     try:
         curated = await fetch_curated(date)
@@ -37,13 +38,8 @@ async def get_mugs(
     except UpstreamError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    # Race times + BoD summary scrape in parallel — both are best-effort.
-    races_task = asyncio.create_task(_safe_fetch_races(date))
-    summary_task = asyncio.create_task(_safe_scrape_bod(days))
-    ra_races = await races_task
-    bod_summaries = await summary_task
-
-    return build_today(curated, ra_races, bod_summaries=bod_summaries, days=days)
+    ra_races = await _safe_fetch_races(date)
+    return build_today(curated, ra_races)
 
 
 async def _safe_fetch_races(date: str | None) -> list[dict]:
@@ -51,14 +47,3 @@ async def _safe_fetch_races(date: str | None) -> list[dict]:
         return await fetch_races(date)
     except RACrawlerError:
         return []
-
-
-async def _safe_scrape_bod(days: int) -> dict:
-    try:
-        html = await fetch_best_of_day_html(days)
-    except UpstreamError:
-        return {}
-    try:
-        return parse_bod_summaries(html)
-    except Exception:
-        return {}

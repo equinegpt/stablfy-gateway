@@ -18,37 +18,12 @@ class UpstreamNotFound(UpstreamError):
     """Upstream returned 404 — no picks for the requested date."""
 
 
-async def fetch_best_of_day_html(days: int = 30) -> str:
-    """Fetch the public `/best-of-day` HTML page (no auth).
-
-    Used to scrape rolling per-lane summaries (strike rate, ROI, P&L) which
-    aren't exposed as JSON anywhere else. Brittle to HTML changes — if the
-    upstream restyles that page, [[bod_summary.parse_bod_summaries]] needs
-    an update.
-    """
-    base = settings.STABLFY_SOCIAL_BASE_URL.rstrip("/")
-    url = f"{base}/best-of-day"
-    params = {"days": days}
-
-    async with httpx.AsyncClient(timeout=settings.UPSTREAM_TIMEOUT_SECONDS) as client:
-        try:
-            resp = await client.get(url, params=params)
-        except httpx.HTTPError as exc:
-            raise UpstreamError(f"stablfy-social /best-of-day failed: {exc}") from exc
-
-    if resp.status_code >= 400:
-        raise UpstreamError(
-            f"stablfy-social returned {resp.status_code}",
-            status_code=resp.status_code,
-        )
-    return resp.text
-
-
 async def fetch_curated(date: str | None = None) -> dict:
-    """Fetch /api/curated — today's curated paper-trade snapshot (BoD + lanes).
+    """Fetch /api/curated — today's curated paper-trade snapshot.
 
-    Public, no auth. Returns the existing top-level shape including
-    `best_of_day` and `best_of_day_v2_career` arrays.
+    Public, no auth. Returns `best_of_day[]`, `lanes.{L4_class, L2_mid_favs,
+    L1_short_favs, L3_maiden, V_value, P_divergence, S_steam}`,
+    `is_stakes_day`, `metro_pick_count`, etc.
     """
     base = settings.STABLFY_SOCIAL_BASE_URL.rstrip("/")
     url = f"{base}/api/curated"

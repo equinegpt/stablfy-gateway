@@ -572,49 +572,65 @@ class BuildResponse(BaseModel):
 
 
 class MugPick(BaseModel):
-    """One BoD pick, lifted from /api/curated and enriched with race start
-    time from RA Crawler. Status is PENDING for today's picks — settled
-    rollups live on the lane summary, not per pick.
+    """One pick from /api/curated. Lifted with race start time from RA
+    Crawler. `role` tells you whether this pick was the BoD primary
+    (L4) or a fallback (L2/L1/L3) — important since L4 is the only
+    +ROI lane on the executable feed.
+
+    `is_star_tier` is True for L4_class picks where Gemini also rates
+    the runner AI_BEST. On the 9-week audit (Apr 23 → Jun 26) the ★
+    intersection ran +34.7% ROI on n=222 — the only meaningfully
+    standout signal in the lane system.
     """
     model_config = ConfigDict(extra="ignore")
     horse: str
     meeting: str | None = None
     race_number: int | None = None
     tab_number: int | None = None
-    model_price: float | None = None
-    market_price: float | None = None
-    role: str = "primary"
+    model_price: float | None = None        # Clone-derived fair price
+    market_price: float | None = None       # tab live
+    role: str = "primary"                   # primary | fallback | fallback2 | fallback3
+    source_lane: str | None = None          # "L4_class" | "L2_mid_favs" | ...
+    is_star_tier: bool = False              # L4 ∩ Gemini AI_BEST
+    win_pct: float | None = None
+    career_starts: int | None = None
     race_time: str | None = None
     status: MugStatus = "pending"
 
 
-class BodLaneSummary(BaseModel):
-    """Rolling-window summary for a BoD lane, scraped from /best-of-day HTML."""
+class LaneAudit(BaseModel):
+    """Static 9-week backtest stats (Apr 23 → Jun 26) hard-coded into the
+    gateway. The /api/curated payload doesn't carry rolling SR/ROI per
+    lane — these numbers come from the stablfy-social audit that locked
+    in the lane system. Refreshed manually when the audit re-runs.
+    """
     model_config = ConfigDict(extra="ignore")
-    days: int = 30
-    picks: int = 0
-    settled: int = 0
-    wins: int = 0
-    places: int = 0
-    no_run: int = 0
-    strike_pct: float | None = None
-    place_pct: float | None = None
-    roi_pct: float | None = None
-    profit: float | None = None
-    avg_winning_sp: float | None = None
+    n: int                                   # sample size
+    strike_pct: float
+    roi_pct: float
 
 
-class BodLane(BaseModel):
-    key: str             # "v1" | "v2"
-    name: str            # public label
+class Lane(BaseModel):
+    """One of the four production lanes (L4 / L2 / L1 / L3).
+
+    Research-only lanes (V / P / S) are deliberately not surfaced here —
+    they don't validate on the executable feed.
+    """
+    model_config = ConfigDict(extra="ignore")
+    key: str                                  # "L4_class" | "L2_mid_favs" | ...
+    name: str                                 # display label
     subtitle: str
-    summary: BodLaneSummary
+    is_primary: bool = False                  # True only for L4_class
+    audit: LaneAudit | None = None            # hard-coded backtest stats
     picks: list[MugPick]
 
 
 class MugsResponse(BaseModel):
     date: str | None = None
-    lanes: list[BodLane]
+    best_of_day: list[MugPick] = []           # top-3 picks (sourced from primary first, then fallbacks)
+    lanes: list[Lane] = []                    # full L4/L2/L1/L3 plays
+    is_stakes_day: bool = False
+    metro_pick_count: int = 0
 
 
 class AgreementRunner(BaseModel):
