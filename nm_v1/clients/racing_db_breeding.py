@@ -26,7 +26,7 @@ async def _get(path: str, params: dict) -> list[dict]:
     url = f"{base}/{path.lstrip('/')}"
     async with httpx.AsyncClient(timeout=_BREEDING_TIMEOUT) as client:
         try:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=({"X-API-Key": settings.RACING_DB_API_KEY} if settings.RACING_DB_API_KEY else {}))
         except httpx.HTTPError as exc:
             raise BreedingError(f"racing-db breeding request failed: {exc}") from exc
     if resp.status_code >= 400:

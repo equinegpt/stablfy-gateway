@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     PF_API_BASE_URL: str = "https://api.puntingform.com.au/v2"
     PF_API_KEY: str = ""
     RACING_DB_BASE_URL: str = "https://racing-db.onrender.com"
+    RACING_DB_API_KEY: str = ""   # racing-db /api key; env RACING_DB_API_KEY
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta"
     GEMINI_MODEL: str = "gemini-2.0-flash"
     GEMINI_API_KEY: str = ""
