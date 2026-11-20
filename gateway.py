@@ -830,7 +830,7 @@ async def proxy_pf_meetings(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -884,7 +884,7 @@ async def proxy_pf_races(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         print(f"[GW PF RACES] network error for meetingId={meetingId}: {exc}")
         return []
@@ -959,7 +959,7 @@ async def proxy_pf_form(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"PF upstream error: {exc}") from exc
 
@@ -1005,7 +1005,7 @@ async def proxy_pf_sectionals(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -1061,7 +1061,7 @@ async def proxy_sectionals(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -1117,7 +1117,7 @@ async def proxy_speedmaps(
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -1148,6 +1148,9 @@ async def proxy_speedmaps(
 # -------------------------------------------------------------------
 
 RACING_DB_API_URL = os.getenv("RACING_DB_API_URL", "").rstrip("/")
+# racing-db /api is behind an API key (racing-db web/api_key_gate.py). Sent on every racing-db call.
+RACING_DB_API_KEY = os.getenv("RACING_DB_API_KEY", "")
+RACING_DB_HEADERS = {"X-API-Key": RACING_DB_API_KEY} if RACING_DB_API_KEY else {}
 
 
 @app.get(
@@ -1169,7 +1172,7 @@ async def proxy_horse_search(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Racing DB error: {exc}") from exc
 
@@ -1198,7 +1201,7 @@ async def proxy_horse_profile(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params)
+            resp = await client.get(url, params=params, headers=RACING_DB_HEADERS)
     except httpx.RequestError as exc:
         raise HTTPException(status_code=502, detail=f"Racing DB error: {exc}") from exc
 
